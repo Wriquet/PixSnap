@@ -120,6 +120,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                     overlay.orderFrontRegardless()
                 }
                 keyOverlay?.makeKeyAndOrderFront(nil)
+                keyOverlay?.makeFirstResponder(keyOverlay?.overlayView)
                 NSApp.activate(ignoringOtherApps: true)
             } catch {
                 presentScreenPermissionAlert(error: error)
