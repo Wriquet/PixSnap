@@ -1478,16 +1478,42 @@ public final class OverlayView: NSView {
 
     // MARK: - Adaptive Liquid Glass (light glass on bright backdrops, dark glass on dark ones)
 
+    private static let glassCrossfadeDuration: CFTimeInterval = 0.32
+    /// Hysteresis + cool-down gate (see GlassToneGate) – prevents light/dark strobing near boundaries.
+    private var glassToneGate = GlassToneGate()
+    private var glassRecheckScheduled = false
+
     private func updateToolbarGlassAppearance() {
         guard PixTheme.supportsLiquidGlass, !toolbar.isHidden else { return }
         var area = toolbar.frame
         if !toolbar.subBar.isHidden { area = area.union(toolbar.subBar.frame) }
         let luminance = backdropLuminance(in: area)
-        let name: NSAppearance.Name = luminance > 0.5 ? .aqua : .darkAqua
-        guard toolbar.appearance?.name != name else { return }
-        let appearance = NSAppearance(named: name)
-        toolbar.appearance = appearance
-        toolbar.subBar.appearance = appearance
+        let now = CACurrentMediaTime()
+
+        switch glassToneGate.evaluate(luminance: luminance, now: now) {
+        case .keep:
+            return
+        case .retry(let at):
+            guard !glassRecheckScheduled else { return }
+            glassRecheckScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, at - now) + 0.02) { [weak self] in
+                guard let self else { return }
+                self.glassRecheckScheduled = false
+                self.updateToolbarGlassAppearance()   // trailing evaluation with the latest position
+            }
+        case .apply(let dark, let animated):
+            let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            for bar in [toolbar as NSView, toolbar.subBar as NSView] {
+                if animated, let layer = bar.layer {
+                    let fade = CATransition()
+                    fade.type = .fade
+                    fade.duration = Self.glassCrossfadeDuration
+                    fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    layer.add(fade, forKey: "glassAppearance")
+                }
+                bar.appearance = appearance
+            }
+        }
     }
 
     /// Average perceived luminance (0…1) of what is visible behind `rect`, including the dim mask.

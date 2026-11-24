@@ -160,6 +160,7 @@ final class GlassCapsuleView: NSView {
     let stack = NSStackView()
     private let height: CGFloat
     private var fallbackShadowHost: Bool = false
+    private var glassView: NSView?
 
     init(height: CGFloat, inset: CGFloat, spacing: CGFloat = 2) {
         self.height = height
@@ -187,6 +188,7 @@ final class GlassCapsuleView: NSView {
             ])
             backdrop = glass
             host = content
+            glassView = glass
         } else {
             backdrop = HUDBackgroundView(cornerRadius: radius)
             appearance = NSAppearance(named: .darkAqua) // frosted fallback is always dark
@@ -218,6 +220,26 @@ final class GlassCapsuleView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Light rendition uses the *clear* glass variant (far more see-through, like Apple's media
+    /// controls); dark rendition keeps *regular* glass, which already reads as transparent on dark content.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        syncGlassStyle()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        syncGlassStyle()
+    }
+
+    func syncGlassStyle() {
+        if #available(macOS 26.0, *), let glass = glassView as? NSGlassEffectView {
+            let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let target: NSGlassEffectView.Style = isDark ? .regular : .clear
+            if glass.style != target { glass.style = target }
+        }
+    }
 
     override func layout() {
         super.layout()
