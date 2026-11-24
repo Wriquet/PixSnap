@@ -126,7 +126,13 @@ public final class AppSettings {
         static let rectAnnotationRounded = "pixsnap_rect_annot_rounded"
         static let rectAnnotationCornerRadius = "pixsnap_rect_annot_corner_radius"
         static let colorCopyFormat = "pixsnap_color_copy_format"
+        static let toolbarGlassOpacity = "pixsnap_toolbar_glass_opacity"
     }
+
+    /// Posted on the main actor whenever `toolbarGlassOpacity` changes (live-updates open toolbars).
+    public static let toolbarGlassOpacityDidChange = Notification.Name("PixSnapToolbarGlassOpacityDidChange")
+    public static let toolbarGlassOpacityRange: ClosedRange<CGFloat> = 0.2...1.0
+    public static let toolbarGlassOpacityDefault: CGFloat = 0.6
 
     private init() {}
 
@@ -311,6 +317,20 @@ public final class AppSettings {
 
     public var effectiveRectAnnotationCornerRadius: CGFloat {
         rectAnnotationRounded ? rectAnnotationCornerRadius : 0.0
+    }
+
+    /// 截图工具栏液态玻璃材质的不透明度（0.2 ~ 1.0，越小越透明；1.0 = 系统原生玻璃）
+    public var toolbarGlassOpacity: CGFloat {
+        get {
+            if ud.object(forKey: Keys.toolbarGlassOpacity) == nil { return Self.toolbarGlassOpacityDefault }
+            let r = Self.toolbarGlassOpacityRange
+            return max(r.lowerBound, min(r.upperBound, CGFloat(ud.double(forKey: Keys.toolbarGlassOpacity))))
+        }
+        set {
+            let r = Self.toolbarGlassOpacityRange
+            ud.set(Double(max(r.lowerBound, min(r.upperBound, newValue))), forKey: Keys.toolbarGlassOpacity)
+            NotificationCenter.default.post(name: Self.toolbarGlassOpacityDidChange, object: nil)
+        }
     }
 
     public var colorCopyFormat: ColorCopyFormat {

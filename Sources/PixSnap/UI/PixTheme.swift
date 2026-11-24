@@ -17,27 +17,56 @@ enum PixTheme {
     static let hudSolid = NSColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 0.94)
     static let hudBorder = NSColor(white: 1.0, alpha: 0.12)
 
-    static let icon = NSColor(white: 1.0, alpha: 0.88)
-    static let iconSecondary = NSColor(white: 1.0, alpha: 0.55)
-    static let iconDisabled = NSColor(white: 1.0, alpha: 0.24)
-    static let textSecondary = NSColor(white: 1.0, alpha: 0.55)
+    // Glass-hosted tokens are *dynamic*: clear Liquid Glass flips between a light and a dark
+    // rendition depending on what is behind it, and glyphs must follow (dark on light, light on dark).
+    static let icon = dynamic(light: (0.0, 0.82), dark: (1.0, 0.92))
+    static let iconSecondary = dynamic(light: (0.0, 0.50), dark: (1.0, 0.60))
+    static let iconDisabled = dynamic(light: (0.0, 0.22), dark: (1.0, 0.26))
+    static let textSecondary = dynamic(light: (0.0, 0.55), dark: (1.0, 0.62))
 
-    static let hoverFill = NSColor(white: 1.0, alpha: 0.10)
-    static let pressedFill = NSColor(white: 1.0, alpha: 0.16)
-    static let segmentTrack = NSColor(white: 1.0, alpha: 0.06)
-    static let segmentSelected = NSColor(white: 1.0, alpha: 0.20)
-    static let separator = NSColor(white: 1.0, alpha: 0.12)
+    static let hoverFill = dynamic(light: (0.0, 0.07), dark: (1.0, 0.13))
+    static let pressedFill = dynamic(light: (0.0, 0.13), dark: (1.0, 0.21))
+    static let segmentTrack = dynamic(light: (0.0, 0.05), dark: (1.0, 0.08))
+    static let segmentSelected = dynamic(light: (1.0, 0.70), dark: (1.0, 0.26))
+    static let separator = dynamic(light: (0.0, 0.12), dark: (1.0, 0.15))
+    static let swatchHairline = dynamic(light: (0.0, 0.18), dark: (1.0, 0.30))
+    static let swatchRing = dynamic(light: (0.0, 0.78), dark: (1.0, 1.0))
+
+    /// (white, alpha) pairs → appearance-aware color.
+    private static func dynamic(light: (CGFloat, CGFloat), dark: (CGFloat, CGFloat)) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let v = isDark ? dark : light
+            return NSColor(white: v.0, alpha: v.1)
+        }
+    }
 
     // MARK: Metrics
 
-    static let barHeight: CGFloat = 40
-    static let subBarHeight: CGFloat = 36
-    static let barRadius: CGFloat = 10
-    static let buttonSize: CGFloat = 30
-    static let segmentSize: CGFloat = 26
-    static let buttonRadius: CGFloat = 7
-    static let iconPointSize: CGFloat = 14
+    // Liquid Glass edition: every surface is a capsule, every button a circle.
+    static let barHeight: CGFloat = 42
+    static let subBarHeight: CGFloat = 38
+    static let barRadius: CGFloat = 21          // = barHeight / 2 → capsule
+    static let barInset: CGFloat = 5
+    static let buttonSize: CGFloat = 32         // barHeight - 2 * barInset
+    static let segmentSize: CGFloat = 28
+    static let buttonRadius: CGFloat = 16       // = buttonSize / 2 → circle
+    static let iconPointSize: CGFloat = 15
     static let groupSpacing: CGFloat = 6
+    /// Gap between neighbouring glass capsules in the main bar.
+    static let capsuleGap: CGFloat = 8
+    /// Corner radius of the magnifier / size-tag family so they echo the capsules.
+    static let panelRadius: CGFloat = 16
+
+    /// Opacity of the glass material itself (controls stay fully opaque on top of it).
+    /// Lower = more see-through. 1.0 is the stock system glass. User-adjustable in Preferences.
+    static var glassOpacity: CGFloat { AppSettings.shared.toolbarGlassOpacity }
+
+    /// True when the OS can render native Liquid Glass (NSGlassEffectView).
+    static var supportsLiquidGlass: Bool {
+        if #available(macOS 26.0, *) { return true }
+        return false
+    }
 
     // MARK: Helpers
 
@@ -125,4 +154,102 @@ final class HUDBackgroundView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+/// A capsule of Liquid Glass hosting a horizontal row of controls.
+///
+/// macOS 26+: native `NSGlassEffectView` (refraction, specular rim, adaptive shadow).
+/// macOS 14–25: frosted capsule fallback with a soft top highlight so the shape language still matches.
+final class GlassCapsuleView: NSView {
+    let stack = NSStackView()
+    private let height: CGFloat
+    private var fallbackShadowHost: Bool = false
+    private var glassView: NSView?
+
+    init(height: CGFloat, inset: CGFloat, spacing: CGFloat = 2) {
+        self.height = height
+        super.init(frame: NSRect(x: 0, y: 0, width: height, height: height))
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        let radius = height / 2
+        let backdrop: NSView
+        let host: NSView            // where the controls live
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.style = .clear
+            glass.cornerRadius = radius
+            // Controls sit *above* the glass (not in its contentView) so the glass material can be
+            // made more see-through via alphaValue without fading the icons.
+            backdrop = glass
+            host = self
+            glassView = glass
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(glassOpacitySettingChanged),
+                name: AppSettings.toolbarGlassOpacityDidChange,
+                object: nil
+            )
+        } else {
+            backdrop = HUDBackgroundView(cornerRadius: radius)
+            appearance = NSAppearance(named: .darkAqua) // frosted fallback is always dark
+            PixTheme.applyHUDShadow(to: self)
+            fallbackShadowHost = true
+            host = self
+        }
+        backdrop.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(backdrop)
+
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = spacing
+        stack.edgeInsets = NSEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            backdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backdrop.topAnchor.constraint(equalTo: topAnchor),
+            backdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+            heightAnchor.constraint(equalToConstant: height)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Both renditions use the *clear* glass variant (the most see-through system glass) and the
+    /// material is further faded by `glassOpacity`; light / dark only changes glyph & fill colors.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        syncGlassStyle()
+    }
+
+    @objc private func glassOpacitySettingChanged() {
+        syncGlassStyle()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        syncGlassStyle()
+    }
+
+    func syncGlassStyle() {
+        if #available(macOS 26.0, *), let glass = glassView as? NSGlassEffectView {
+            if glass.style != .clear { glass.style = .clear }
+            glass.alphaValue = PixTheme.glassOpacity
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        if fallbackShadowHost {
+            PixTheme.updateShadowPath(of: self, radius: height / 2)
+        }
+    }
 }

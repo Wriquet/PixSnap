@@ -1202,21 +1202,21 @@ public final class OverlayView: NSView {
             .foregroundColor: NSColor.white
         ]
         let size = (text as NSString).size(withAttributes: attr)
-        let pillW = ceil(size.width) + 16
+        let pillW = ceil(size.width) + 20
         let pillH = ceil(size.height) + 8
 
         let clampedX = min(max(bounds.minX + 6, preferredOrigin.x), bounds.maxX - pillW - 6)
         let clampedY = min(max(bounds.minY + 6, preferredOrigin.y), bounds.maxY - pillH - 6)
         let pillRect = CGRect(x: clampedX, y: clampedY, width: pillW, height: pillH)
 
-        let path = NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6)
+        let path = NSBezierPath(roundedRect: pillRect, xRadius: pillH / 2, yRadius: pillH / 2)
         PixTheme.hudSolid.setFill()
         path.fill()
         PixTheme.hudBorder.setStroke()
         path.lineWidth = 1
         path.stroke()
 
-        (text as NSString).draw(at: CGPoint(x: pillRect.minX + 8, y: pillRect.minY + 4), withAttributes: attr)
+        (text as NSString).draw(at: CGPoint(x: pillRect.minX + 10, y: pillRect.minY + 4), withAttributes: attr)
     }
 
     private func drawHandles(in ctx: CGContext) {
@@ -1434,8 +1434,8 @@ public final class OverlayView: NSView {
     }
 
     private func positionToolbars() {
-        let margin: CGFloat = 8
-        let gap: CGFloat = 6
+        let margin: CGFloat = 10
+        let gap: CGFloat = 8
         let tbW = toolbar.frame.width
         let tbH = toolbar.frame.height
         let subVisible = !toolbar.subBar.isHidden
@@ -1476,6 +1476,84 @@ public final class OverlayView: NSView {
             subX = max(bounds.minX + margin, min(bounds.maxX - subW - margin, subX))
             toolbar.subBar.frame.origin = CGPoint(x: round(subX), y: round(subY))
         }
+        updateToolbarGlassAppearance()
+    }
+
+    // MARK: - Adaptive Liquid Glass (light glass on bright backdrops, dark glass on dark ones)
+
+    private static let glassCrossfadeDuration: CFTimeInterval = 0.32
+    /// Hysteresis + cool-down gate (see GlassToneGate) – prevents light/dark strobing near boundaries.
+    private var glassToneGate = GlassToneGate()
+    private var glassRecheckScheduled = false
+
+    private func updateToolbarGlassAppearance() {
+        guard PixTheme.supportsLiquidGlass, !toolbar.isHidden else { return }
+        var area = toolbar.frame
+        if !toolbar.subBar.isHidden { area = area.union(toolbar.subBar.frame) }
+        let luminance = backdropLuminance(in: area)
+        let now = CACurrentMediaTime()
+
+        switch glassToneGate.evaluate(luminance: luminance, now: now) {
+        case .keep:
+            return
+        case .retry(let at):
+            guard !glassRecheckScheduled else { return }
+            glassRecheckScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, at - now) + 0.02) { [weak self] in
+                guard let self else { return }
+                self.glassRecheckScheduled = false
+                self.updateToolbarGlassAppearance()   // trailing evaluation with the latest position
+            }
+        case .apply(let dark, let animated):
+            let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            for bar in [toolbar as NSView, toolbar.subBar as NSView] {
+                if animated, let layer = bar.layer {
+                    let fade = CATransition()
+                    fade.type = .fade
+                    fade.duration = Self.glassCrossfadeDuration
+                    fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    layer.add(fade, forKey: "glassAppearance")
+                }
+                bar.appearance = appearance
+            }
+        }
+    }
+
+    /// Average perceived luminance (0…1) of what is visible behind `rect`, including the dim mask.
+    private func backdropLuminance(in rect: CGRect) -> CGFloat {
+        let img = capturedScreen.image
+        let r = rect.intersection(bounds)
+        guard !r.isNull, r.width >= 2, r.height >= 2, bounds.width > 0, bounds.height > 0 else { return 0.5 }
+        let sx = CGFloat(img.width) / bounds.width
+        let sy = CGFloat(img.height) / bounds.height
+        let pixelRect = CGRect(
+            x: r.minX * sx,
+            y: (bounds.height - r.maxY) * sy,
+            width: r.width * sx,
+            height: r.height * sy
+        ).integral
+        guard let crop = img.cropping(to: pixelRect),
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return 0.5 }
+
+        let w = 24, h = 6
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        let sum: CGFloat = bytes.withUnsafeMutableBytes { buf -> CGFloat in
+            guard let ctx = CGContext(
+                data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return CGFloat(w * h) * 0.5 }
+            ctx.interpolationQuality = .low
+            ctx.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
+            var total: CGFloat = 0
+            for i in stride(from: 0, to: w * h * 4, by: 4) {
+                total += (0.2126 * CGFloat(buf[i]) + 0.7152 * CGFloat(buf[i + 1]) + 0.0722 * CGFloat(buf[i + 2])) / 255.0
+            }
+            return total
+        }
+        let average = sum / CGFloat(w * h)
+        // Toolbars normally float over the 42 % black dim mask; inside the selection they see raw pixels.
+        let overSelection = selectionRect.contains(CGPoint(x: rect.midX, y: rect.midY))
+        return overSelection ? average : average * 0.58
     }
 
     // MARK: - Final Export & Actions

@@ -161,8 +161,12 @@ public final class PreferencesWindow: NSWindow {
     private let pinRadiusSlider = NSSlider(value: 8, minValue: 2, maxValue: 24, target: nil, action: nil)
     private let pinRadiusLabel = NSTextField(labelWithString: "0 px")
 
+    // Toolbar Liquid Glass opacity
+    private let glassOpacitySlider = NSSlider(value: 60, minValue: 20, maxValue: 100, target: nil, action: nil)
+    private let glassOpacityLabel = NSTextField(labelWithString: "60%")
+
     public init() {
-        let frame = NSRect(x: 0, y: 0, width: 540, height: 450)
+        let frame = NSRect(x: 0, y: 0, width: 540, height: 484)
         super.init(
             contentRect: frame,
             styleMask: [.titled, .closable],
@@ -208,6 +212,9 @@ public final class PreferencesWindow: NSWindow {
         pinRadiusSlider.doubleValue = Double(s.pinCornerRadius)
         pinRadiusSlider.isEnabled = s.pinUseRoundedCorners
         pinRadiusLabel.stringValue = s.pinUseRoundedCorners ? "\(Int(round(s.pinCornerRadius))) px" : "直角"
+
+        glassOpacitySlider.doubleValue = Double(round(s.toolbarGlassOpacity * 100))
+        glassOpacityLabel.stringValue = "\(Int(round(s.toolbarGlassOpacity * 100)))%"
 
         for btn in recorderButtons.values {
             btn.updateButtonTitle()
@@ -441,6 +448,8 @@ public final class PreferencesWindow: NSWindow {
             valueLabel: pinRadiusLabel
         ))
 
+        stack.addArrangedSubview(makeGlassOpacityRow())
+
         stack.addArrangedSubview(makeDivider())
 
         let pinAnchorRow = NSStackView()
@@ -529,6 +538,63 @@ public final class PreferencesWindow: NSWindow {
         row.addArrangedSubview(valueLabel)
 
         return row
+    }
+
+    private func makeGlassOpacityRow() -> NSView {
+        let column = NSStackView()
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 4
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 10
+        row.alignment = .centerY
+
+        let lbl = NSTextField(labelWithString: "工具栏玻璃：")
+        lbl.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        lbl.alignment = .right
+        lbl.widthAnchor.constraint(equalToConstant: 145).isActive = true
+        row.addArrangedSubview(lbl)
+
+        let moreClear = NSTextField(labelWithString: "透")
+        moreClear.font = NSFont.systemFont(ofSize: 11)
+        moreClear.textColor = .secondaryLabelColor
+        row.addArrangedSubview(moreClear)
+
+        glassOpacitySlider.target = self
+        glassOpacitySlider.action = #selector(glassOpacityChanged)
+        glassOpacitySlider.isContinuous = true
+        glassOpacitySlider.widthAnchor.constraint(equalToConstant: 162).isActive = true
+        row.addArrangedSubview(glassOpacitySlider)
+
+        let moreSolid = NSTextField(labelWithString: "实")
+        moreSolid.font = NSFont.systemFont(ofSize: 11)
+        moreSolid.textColor = .secondaryLabelColor
+        row.addArrangedSubview(moreSolid)
+
+        glassOpacityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
+        glassOpacityLabel.textColor = .secondaryLabelColor
+        glassOpacityLabel.widthAnchor.constraint(equalToConstant: 42).isActive = true
+        row.addArrangedSubview(glassOpacityLabel)
+
+        let resetBtn = NSButton(title: "默认", target: self, action: #selector(resetGlassOpacity))
+        resetBtn.bezelStyle = .rounded
+        resetBtn.controlSize = .small
+        row.addArrangedSubview(resetBtn)
+        column.addArrangedSubview(row)
+
+        let hint = NSTextField(labelWithString: PixTheme.supportsLiquidGlass
+            ? "拖动实时生效；越往左越透明，100% 为系统原生液态玻璃。"
+            : "需要 macOS 26 及以上（液态玻璃）才会生效。")
+        hint.font = NSFont.systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        column.addArrangedSubview(hint)
+        hint.leadingAnchor.constraint(equalTo: glassOpacitySlider.leadingAnchor).isActive = true
+
+        glassOpacitySlider.isEnabled = PixTheme.supportsLiquidGlass
+        return column
     }
 
     private func makeDivider() -> NSView {
@@ -691,6 +757,19 @@ public final class PreferencesWindow: NSWindow {
         pinRadiusSlider.isEnabled = rounded
         pinRadiusLabel.stringValue = rounded ? "\(Int(round(AppSettings.shared.pinCornerRadius))) px" : "直角"
         onPinAppearanceSettingsChanged?()
+    }
+
+    @objc private func glassOpacityChanged() {
+        let pct = round(glassOpacitySlider.doubleValue)
+        AppSettings.shared.toolbarGlassOpacity = CGFloat(pct / 100)
+        glassOpacityLabel.stringValue = "\(Int(pct))%"
+    }
+
+    @objc private func resetGlassOpacity() {
+        AppSettings.shared.toolbarGlassOpacity = AppSettings.toolbarGlassOpacityDefault
+        let pct = round(AppSettings.toolbarGlassOpacityDefault * 100)
+        glassOpacitySlider.doubleValue = Double(pct)
+        glassOpacityLabel.stringValue = "\(Int(pct))%"
     }
 
     @objc private func pinRadiusChanged() {
