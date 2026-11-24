@@ -27,7 +27,7 @@ enum PixTheme {
     static let hoverFill = dynamic(light: (0.0, 0.07), dark: (1.0, 0.13))
     static let pressedFill = dynamic(light: (0.0, 0.13), dark: (1.0, 0.21))
     static let segmentTrack = dynamic(light: (0.0, 0.05), dark: (1.0, 0.08))
-    static let segmentSelected = dynamic(light: (1.0, 0.92), dark: (1.0, 0.26))
+    static let segmentSelected = dynamic(light: (1.0, 0.70), dark: (1.0, 0.26))
     static let separator = dynamic(light: (0.0, 0.12), dark: (1.0, 0.15))
     static let swatchHairline = dynamic(light: (0.0, 0.18), dark: (1.0, 0.30))
     static let swatchRing = dynamic(light: (0.0, 0.78), dark: (1.0, 1.0))
@@ -57,6 +57,10 @@ enum PixTheme {
     static let capsuleGap: CGFloat = 8
     /// Corner radius of the magnifier / size-tag family so they echo the capsules.
     static let panelRadius: CGFloat = 16
+
+    /// Opacity of the glass material itself (controls stay fully opaque on top of it).
+    /// Lower = more see-through. 1.0 is the stock system glass.
+    static var glassOpacity: CGFloat = 0.6
 
     /// True when the OS can render native Liquid Glass (NSGlassEffectView).
     static var supportsLiquidGlass: Bool {
@@ -161,6 +165,7 @@ final class GlassCapsuleView: NSView {
     private let height: CGFloat
     private var fallbackShadowHost: Bool = false
     private var glassView: NSView?
+    private let glassOpacity: CGFloat = PixTheme.glassOpacity
 
     init(height: CGFloat, inset: CGFloat, spacing: CGFloat = 2) {
         self.height = height
@@ -174,20 +179,12 @@ final class GlassCapsuleView: NSView {
         let host: NSView            // where the controls live
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
-            glass.style = .regular
+            glass.style = .clear
             glass.cornerRadius = radius
-            // Controls go *inside* the glass so they inherit its adaptive light/dark rendition.
-            let content = NSView()
-            content.translatesAutoresizingMaskIntoConstraints = false
-            glass.contentView = content
-            NSLayoutConstraint.activate([
-                content.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
-                content.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
-                content.topAnchor.constraint(equalTo: glass.topAnchor),
-                content.bottomAnchor.constraint(equalTo: glass.bottomAnchor)
-            ])
+            // Controls sit *above* the glass (not in its contentView) so the glass material can be
+            // made more see-through via alphaValue without fading the icons.
             backdrop = glass
-            host = content
+            host = self
             glassView = glass
         } else {
             backdrop = HUDBackgroundView(cornerRadius: radius)
@@ -221,8 +218,8 @@ final class GlassCapsuleView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Light rendition uses the *clear* glass variant (far more see-through, like Apple's media
-    /// controls); dark rendition keeps *regular* glass, which already reads as transparent on dark content.
+    /// Both renditions use the *clear* glass variant (the most see-through system glass) and the
+    /// material is further faded by `glassOpacity`; light / dark only changes glyph & fill colors.
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         syncGlassStyle()
@@ -235,9 +232,8 @@ final class GlassCapsuleView: NSView {
 
     func syncGlassStyle() {
         if #available(macOS 26.0, *), let glass = glassView as? NSGlassEffectView {
-            let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            let target: NSGlassEffectView.Style = isDark ? .regular : .clear
-            if glass.style != target { glass.style = target }
+            if glass.style != .clear { glass.style = .clear }
+            glass.alphaValue = glassOpacity
         }
     }
 
