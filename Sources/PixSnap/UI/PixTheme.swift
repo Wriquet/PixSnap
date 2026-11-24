@@ -59,8 +59,8 @@ enum PixTheme {
     static let panelRadius: CGFloat = 16
 
     /// Opacity of the glass material itself (controls stay fully opaque on top of it).
-    /// Lower = more see-through. 1.0 is the stock system glass.
-    static var glassOpacity: CGFloat = 0.6
+    /// Lower = more see-through. 1.0 is the stock system glass. User-adjustable in Preferences.
+    static var glassOpacity: CGFloat { AppSettings.shared.toolbarGlassOpacity }
 
     /// True when the OS can render native Liquid Glass (NSGlassEffectView).
     static var supportsLiquidGlass: Bool {
@@ -165,7 +165,6 @@ final class GlassCapsuleView: NSView {
     private let height: CGFloat
     private var fallbackShadowHost: Bool = false
     private var glassView: NSView?
-    private let glassOpacity: CGFloat = PixTheme.glassOpacity
 
     init(height: CGFloat, inset: CGFloat, spacing: CGFloat = 2) {
         self.height = height
@@ -186,6 +185,12 @@ final class GlassCapsuleView: NSView {
             backdrop = glass
             host = self
             glassView = glass
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(glassOpacitySettingChanged),
+                name: AppSettings.toolbarGlassOpacityDidChange,
+                object: nil
+            )
         } else {
             backdrop = HUDBackgroundView(cornerRadius: radius)
             appearance = NSAppearance(named: .darkAqua) // frosted fallback is always dark
@@ -225,6 +230,10 @@ final class GlassCapsuleView: NSView {
         syncGlassStyle()
     }
 
+    @objc private func glassOpacitySettingChanged() {
+        syncGlassStyle()
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         syncGlassStyle()
@@ -233,7 +242,7 @@ final class GlassCapsuleView: NSView {
     func syncGlassStyle() {
         if #available(macOS 26.0, *), let glass = glassView as? NSGlassEffectView {
             if glass.style != .clear { glass.style = .clear }
-            glass.alphaValue = glassOpacity
+            glass.alphaValue = PixTheme.glassOpacity
         }
     }
 
