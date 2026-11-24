@@ -1,0 +1,13 @@
+.DS_Store
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+
+# Build products (keep Info.plist & icon so build_app.sh can package the bundle)
+/PixSnap.app/Contents/MacOS/
+/PixSnap.app/Contents/_CodeSignature/
+.swiftpm/
