@@ -11,14 +11,14 @@ jobs:
 
       - name: Compile AppIcon.icon with Xcode actool
         run: |
-          ls -d /Applications/Xcode*.app || true
-          xcodebuild -version || true
+          xcodebuild -version
           mkdir -p out
 
           compile_with() {
             local xcode="$1"
             echo "Trying $xcode ..."
             sudo xcode-select -s "$xcode/Contents/Developer"
+            rm -rf out/*
             xcrun actool --compile out \
               --output-format human-readable-text \
               --notices --warnings --errors \
@@ -31,10 +31,11 @@ jobs:
               --minimum-deployment-target 14.0 \
               --platform macosx \
               Assets/AppIcon.icon
+            [ -f out/Assets.car ]
           }
 
           SUCCESS=0
-          for xcode in /Applications/Xcode_26*.app /Applications/Xcode.app; do
+          for xcode in /Applications/Xcode.app /Applications/Xcode_26.6.app /Applications/Xcode_26.4.app /Applications/Xcode_26.2.app /Applications/Xcode_26.0.1.app; do
             [ -d "$xcode" ] || continue
             if compile_with "$xcode"; then
               SUCCESS=1
@@ -43,7 +44,7 @@ jobs:
           done
 
           if [ "$SUCCESS" -ne 1 ]; then
-            echo "actool failed on all available Xcodes"
+            echo "actool failed to produce out/Assets.car on all Xcodes"
             exit 1
           fi
 
