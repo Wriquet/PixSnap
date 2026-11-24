@@ -138,42 +138,27 @@ private final class CardDividerView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-// MARK: - Liquid Glass Capsule Tab Bar
+// MARK: - Liquid Glass Sliding Capsule Tab Bar
 
-private final class GlassTabButton: NSButton {
-    var isSelectedTab: Bool = false {
-        didSet { if oldValue != isSelectedTab { refresh(animated: true) } }
-    }
-    private var isHovered = false
-    private let pillLayer = CALayer()
+private final class GlassTabItemView: NSView {
     private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
 
-    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+    var isHighlightedTab: Bool = false {
+        didSet { if oldValue != isHighlightedTab { refresh() } }
+    }
+    var isHoveredTab: Bool = false {
+        didSet { if oldValue != isHoveredTab { refresh() } }
+    }
+
+    override var mouseDownCanMoveWindow: Bool { false }
 
     init(title: String, symbol: String) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        isBordered = false
-        bezelStyle = .regularSquare
-        self.title = ""
-        setAccessibilityLabel(title)
-        if let cell = cell as? NSButtonCell {
-            cell.highlightsBy = []
-            cell.showsStateBy = []
-        }
-
-        wantsLayer = true
-        layer?.cornerRadius = 15
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = false
-
-        pillLayer.cornerRadius = 15
-        pillLayer.cornerCurve = .continuous
-        layer?.insertSublayer(pillLayer, at: 0)
 
         let cfg = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .medium)
-        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?.withSymbolConfiguration(cfg) {
             img.isTemplate = true
             iconView.image = img
         }
@@ -183,107 +168,178 @@ private final class GlassTabButton: NSButton {
         label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         label.setContentHuggingPriority(.required, for: .horizontal)
 
-        let contentStack = NSStackView(views: [iconView, label])
-        contentStack.orientation = .horizontal
-        contentStack.alignment = .centerY
-        contentStack.spacing = 5
-        contentStack.edgeInsets = NSEdgeInsets(top: 0, left: 13, bottom: 0, right: 14)
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(contentStack)
+        let stack = NSStackView(views: [iconView, label])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 5
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 14, bottom: 0, right: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 30),
-            contentStack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            contentStack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            contentStack.centerYAnchor.constraint(equalTo: centerYAnchor)
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
 
-        addTrackingArea(NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        ))
-        refresh(animated: false)
+        refresh()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(convert(point, from: superview)) ? self : nil
+    // Pass mouse hit-testing through to parent GlassTabBar for unified click & drag scrubbing
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refresh()
     }
+
+    private func refresh() {
+        let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let textColor: NSColor
+        let iconColor: NSColor
+
+        if isHighlightedTab {
+            textColor = isDark ? .white : NSColor(white: 0.08, alpha: 1.0)
+            iconColor = isDark ? .white : PixTheme.accent
+        } else if isHoveredTab {
+            textColor = isDark ? NSColor.white.withAlphaComponent(0.92) : NSColor(white: 0.14, alpha: 1.0)
+            iconColor = textColor
+        } else {
+            textColor = isDark ? NSColor.white.withAlphaComponent(0.68) : NSColor(white: 0.26, alpha: 0.86)
+            iconColor = textColor
+        }
+
+        label.font = NSFont.systemFont(ofSize: 12.5, weight: isHighlightedTab ? .semibold : .medium)
+        label.textColor = textColor
+        iconView.contentTintColor = iconColor
+    }
+}
+
+/// Elevated glass capsule thumb that slides smoothly between tabs (both on click and interactive press-drag).
+private final class SlidingGlassThumbView: NSView {
+    private let pillLayer = CALayer()
+    private var isLifted = false
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        pillLayer.cornerRadius = 15
+        pillLayer.cornerCurve = .continuous
+        pillLayer.borderWidth = 0.75
+        layer?.addSublayer(pillLayer)
+        refreshAppearance(animated: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func layout() {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        pillLayer.frame = bounds
+        pillLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+        pillLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        pillLayer.cornerRadius = bounds.height / 2
         CATransaction.commit()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovered = true
-        refresh(animated: true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-        refresh(animated: true)
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        refresh(animated: false)
+        refreshAppearance(animated: false)
     }
 
-    private func refresh(animated: Bool) {
+    func setLifted(_ lifted: Bool, animated: Bool) {
+        guard isLifted != lifted else { return }
+        isLifted = lifted
+        refreshAppearance(animated: animated)
+
+        let targetTransform = lifted
+            ? CATransform3DMakeScale(1.045, 1.08, 1.0)
+            : CATransform3DIdentity
+
+        if animated {
+            let spring = CASpringAnimation(keyPath: "transform")
+            spring.fromValue = pillLayer.presentation()?.transform ?? pillLayer.transform
+            spring.toValue = targetTransform
+            spring.stiffness = 420
+            spring.damping = 26
+            spring.mass = 0.8
+            spring.duration = spring.settlingDuration
+            pillLayer.transform = targetTransform
+            pillLayer.add(spring, forKey: "liftScale")
+        } else {
+            pillLayer.removeAnimation(forKey: "liftScale")
+            pillLayer.transform = targetTransform
+        }
+    }
+
+    private func refreshAppearance(animated: Bool) {
         let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
 
-        let textColor: NSColor
-        let iconColor: NSColor
         let fill: NSColor
+        let border: NSColor
         let shadowOpacity: Float
+        let shadowRadius: CGFloat
+        let shadowOffsetY: CGFloat
 
-        if isSelectedTab {
-            textColor = isDark ? .white : NSColor(white: 0.08, alpha: 1.0)
-            iconColor = isDark ? .white : PixTheme.accent
+        if isLifted {
+            // Slightly more translucent & luminous while scrubbing, like a lifted Liquid Glass lens
+            fill = isDark
+                ? NSColor.white.withAlphaComponent(0.28)
+                : NSColor.white.withAlphaComponent(0.72)
+            border = isDark
+                ? NSColor.white.withAlphaComponent(0.45)
+                : NSColor.white.withAlphaComponent(0.98)
+            shadowOpacity = isDark ? 0.38 : 0.18
+            shadowRadius = 9
+            shadowOffsetY = -3
+        } else {
             fill = isDark
                 ? NSColor.white.withAlphaComponent(0.22)
                 : NSColor.white.withAlphaComponent(0.90)
+            border = isDark
+                ? NSColor.white.withAlphaComponent(0.24)
+                : NSColor.white.withAlphaComponent(0.95)
             shadowOpacity = isDark ? 0.24 : 0.12
-        } else if isHovered {
-            textColor = isDark ? NSColor.white.withAlphaComponent(0.92) : NSColor(white: 0.14, alpha: 1.0)
-            iconColor = textColor
-            fill = isDark
-                ? NSColor.white.withAlphaComponent(0.09)
-                : NSColor.black.withAlphaComponent(0.05)
-            shadowOpacity = 0
-        } else {
-            textColor = isDark ? NSColor.white.withAlphaComponent(0.68) : NSColor(white: 0.26, alpha: 0.86)
-            iconColor = textColor
-            fill = .clear
-            shadowOpacity = 0
+            shadowRadius = 4
+            shadowOffsetY = -1
         }
-
-        label.font = NSFont.systemFont(ofSize: 12.5, weight: isSelectedTab ? .semibold : .medium)
-        label.textColor = textColor
-        iconView.contentTintColor = iconColor
 
         CATransaction.begin()
         CATransaction.setDisableActions(!animated)
         CATransaction.setAnimationDuration(0.16)
         pillLayer.backgroundColor = fill.cgColor
+        pillLayer.borderColor = border.cgColor
         pillLayer.shadowColor = NSColor.black.cgColor
         pillLayer.shadowOpacity = shadowOpacity
-        pillLayer.shadowRadius = 4
-        pillLayer.shadowOffset = CGSize(width: 0, height: -1)
+        pillLayer.shadowRadius = shadowRadius
+        pillLayer.shadowOffset = CGSize(width: 0, height: shadowOffsetY)
         CATransaction.commit()
     }
 }
 
-private final class GlassTabBar: NSView {
+final class GlassTabBar: NSView {
     var onSelect: ((Int) -> Void)?
-    private var buttons: [GlassTabButton] = []
+
+    private let thumbView = SlidingGlassThumbView()
+    private let itemsStack = NSStackView()
+    private var itemViews: [GlassTabItemView] = []
+    private var hostView: NSView!
+
+    private(set) var selectedIndex: Int = 0
+    private var hoveredIndex: Int?
+    private var isDraggingThumb: Bool = false
+    private var hasPlacedInitialThumb: Bool = false
+
+    override var mouseDownCanMoveWindow: Bool { false }
 
     init(items: [(title: String, symbol: String)]) {
         super.init(frame: .zero)
@@ -330,22 +386,22 @@ private final class GlassTabBar: NSView {
         }
         backdrop.translatesAutoresizingMaskIntoConstraints = false
         addSubview(backdrop)
+        self.hostView = host
 
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 4
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(stack)
+        // Sliding glass capsule sits directly behind the tab labels inside the glass bar
+        host.addSubview(thumbView)
 
-        for (index, item) in items.enumerated() {
-            let btn = GlassTabButton(title: item.title, symbol: item.symbol)
-            btn.tag = index
-            btn.target = self
-            btn.action = #selector(tabClicked(_:))
-            buttons.append(btn)
-            stack.addArrangedSubview(btn)
+        itemsStack.orientation = .horizontal
+        itemsStack.alignment = .centerY
+        itemsStack.spacing = 4
+        itemsStack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+        itemsStack.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(itemsStack)
+
+        for item in items {
+            let v = GlassTabItemView(title: item.title, symbol: item.symbol)
+            itemViews.append(v)
+            itemsStack.addArrangedSubview(v)
         }
 
         NSLayoutConstraint.activate([
@@ -354,25 +410,209 @@ private final class GlassTabBar: NSView {
             backdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
             backdrop.topAnchor.constraint(equalTo: topAnchor),
             backdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-            stack.centerYAnchor.constraint(equalTo: host.centerYAnchor)
+            itemsStack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            itemsStack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            itemsStack.centerYAnchor.constraint(equalTo: host.centerYAnchor)
         ])
 
-        setSelected(index: 0)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+
+        updateHighlights(activeIndex: 0)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func setSelected(index: Int) {
-        for (i, btn) in buttons.enumerated() {
-            btn.isSelectedTab = (i == index)
+    override func layout() {
+        super.layout()
+        if !isDraggingThumb, selectedIndex < itemViews.count {
+            let target = itemFrame(at: selectedIndex)
+            if target.width > 0 {
+                if !hasPlacedInitialThumb {
+                    thumbView.frame = target
+                    hasPlacedInitialThumb = true
+                } else if thumbView.layer?.animationKeys()?.isEmpty ?? true {
+                    thumbView.frame = target
+                }
+            }
         }
     }
 
-    @objc private func tabClicked(_ sender: NSButton) {
-        setSelected(index: sender.tag)
-        onSelect?(sender.tag)
+    func setSelected(index: Int, animated: Bool = false) {
+        guard index >= 0 && index < itemViews.count else { return }
+        selectedIndex = index
+        updateHighlights(activeIndex: index)
+        layoutSubtreeIfNeeded()
+        let target = itemFrame(at: index)
+        guard target.width > 0 else { return }
+        hasPlacedInitialThumb = true
+        moveThumb(to: target, animated: animated)
+    }
+
+    private func itemFrame(at index: Int) -> CGRect {
+        let item = itemViews[index]
+        return hostView.convert(item.bounds, from: item)
+    }
+
+    private func moveThumb(to target: CGRect, animated: Bool) {
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.28
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+                ctx.allowsImplicitAnimation = true
+                thumbView.animator().frame = target
+            }
+        } else {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            thumbView.frame = target
+            CATransaction.commit()
+        }
+    }
+
+    private func updateHighlights(activeIndex: Int) {
+        for (i, view) in itemViews.enumerated() {
+            view.isHighlightedTab = (i == activeIndex)
+            view.isHoveredTab = (!isDraggingThumb && hoveredIndex == i)
+        }
+    }
+
+    private func tabIndex(at pointInHost: CGPoint) -> Int? {
+        for i in itemViews.indices {
+            if itemFrame(at: i).contains(pointInHost) {
+                return i
+            }
+        }
+        return nil
+    }
+
+    private func nearestTabIndex(forCenterX x: CGFloat) -> Int {
+        var best = 0
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for i in itemViews.indices {
+            let d = abs(itemFrame(at: i).midX - x)
+            if d < bestDist {
+                bestDist = d
+                best = i
+            }
+        }
+        return best
+    }
+
+    /// Interpolates the capsule width smoothly as its center scrubs between two neighboring tabs.
+    private func interpolatedThumbFrame(forCenterX rawCenterX: CGFloat) -> CGRect {
+        let frames = itemViews.indices.map { itemFrame(at: $0) }
+        guard let first = frames.first, let last = frames.last else { return .zero }
+
+        let minCenter = first.midX
+        let maxCenter = last.midX
+
+        // Subtle rubber-band resistance past the left/right edges
+        let centerX: CGFloat
+        if rawCenterX < minCenter {
+            let over = minCenter - rawCenterX
+            centerX = minCenter - min(5, over * 0.22)
+        } else if rawCenterX > maxCenter {
+            let over = rawCenterX - maxCenter
+            centerX = maxCenter + min(5, over * 0.22)
+        } else {
+            centerX = rawCenterX
+        }
+
+        let clampedForWidth = max(minCenter, min(maxCenter, centerX))
+        var width = first.width
+        for i in 0..<(frames.count - 1) {
+            let a = frames[i]
+            let b = frames[i + 1]
+            if clampedForWidth >= a.midX && clampedForWidth <= b.midX {
+                let span = max(1, b.midX - a.midX)
+                let t = (clampedForWidth - a.midX) / span
+                width = a.width + (b.width - a.width) * t
+                break
+            } else if clampedForWidth >= b.midX {
+                width = b.width
+            }
+        }
+
+        return CGRect(x: centerX - width / 2, y: first.minY, width: width, height: first.height)
+    }
+
+    // MARK: Mouse Hover & Press-Drag Scrubbing
+
+    override func mouseMoved(with event: NSEvent) {
+        let loc = hostView.convert(event.locationInWindow, from: nil)
+        let idx = tabIndex(at: loc)
+        if idx != hoveredIndex {
+            hoveredIndex = idx
+            updateHighlights(activeIndex: selectedIndex)
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if hoveredIndex != nil {
+            hoveredIndex = nil
+            updateHighlights(activeIndex: selectedIndex)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        layoutSubtreeIfNeeded()
+        let startLoc = hostView.convert(event.locationInWindow, from: nil)
+        let downIndex = tabIndex(at: startLoc) ?? nearestTabIndex(forCenterX: startLoc.x)
+
+        isDraggingThumb = true
+        hoveredIndex = nil
+        thumbView.setLifted(true, animated: true)
+        CATransaction.flush()
+
+        // If user grabbed the active capsule, anchor to grab point so it doesn't jump;
+        // if user pressed another tab, center under pointer once dragging starts.
+        let grabOffset: CGFloat = (downIndex == selectedIndex) ? (startLoc.x - thumbView.frame.midX) : 0
+        var previewIndex = selectedIndex
+        var didDrag = false
+        var lastLoc = startLoc
+
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            lastLoc = hostView.convert(next.locationInWindow, from: nil)
+
+            if next.type == .leftMouseDragged {
+                if !didDrag && hypot(lastLoc.x - startLoc.x, lastLoc.y - startLoc.y) >= 3 {
+                    didDrag = true
+                }
+                if didDrag {
+                    let targetFrame = interpolatedThumbFrame(forCenterX: lastLoc.x - grabOffset)
+                    moveThumb(to: targetFrame, animated: false)
+
+                    let nearest = nearestTabIndex(forCenterX: targetFrame.midX)
+                    if nearest != previewIndex {
+                        previewIndex = nearest
+                        updateHighlights(activeIndex: nearest)
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                    }
+                }
+            } else if next.type == .leftMouseUp {
+                break
+            }
+        }
+
+        let finalIndex: Int
+        if didDrag {
+            finalIndex = previewIndex
+        } else {
+            finalIndex = tabIndex(at: lastLoc) ?? downIndex
+        }
+
+        isDraggingThumb = false
+        thumbView.setLifted(false, animated: true)
+        selectedIndex = finalIndex
+        updateHighlights(activeIndex: finalIndex)
+        moveThumb(to: itemFrame(at: finalIndex), animated: true)
+        onSelect?(finalIndex)
     }
 }
 
@@ -380,16 +620,20 @@ private final class GlassTabBar: NSView {
 
 final class ShortcutRecordButton: NSButton {
     let actionType: HotKeyAction
-    var isRecording: Bool = false {
+    private(set) var isRecording: Bool = false {
         didSet {
             updateButtonTitle()
             needsDisplay = true
         }
     }
 
+    var onWillStartRecording: ((ShortcutRecordButton) -> Void)?
     var onShortcutRecorded: ((HotKeyAction, UInt32, UInt32, String) -> Void)?
     var onInvalidShortcut: ((String) -> Void)?
     var onShortcutCleared: ((HotKeyAction) -> Void)?
+
+    private var keyMonitor: Any?
+    private var clickOutsideMonitor: Any?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -405,29 +649,85 @@ final class ShortcutRecordButton: NSButton {
     required init?(coder: NSCoder) { fatalError() }
 
     func updateButtonTitle() {
+        let para = NSMutableParagraphStyle()
+        para.alignment = .center
         if isRecording {
-            title = "按下快捷键 (Esc 取消)…"
             bezelColor = .controlAccentColor
-            contentTintColor = .white
+            attributedTitle = NSAttributedString(
+                string: "按下快捷键 (Esc 取消)…",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                    .foregroundColor: NSColor.white,
+                    .paragraphStyle: para
+                ]
+            )
         } else {
-            title = HotKeyManager.shared.displayString(for: actionType)
             bezelColor = nil
+            title = HotKeyManager.shared.displayString(for: actionType)
             contentTintColor = nil
         }
     }
 
-    override func mouseDown(with event: NSEvent) {
-        if !isRecording {
-            isRecording = true
-            window?.makeFirstResponder(self)
-        } else {
-            isRecording = false
+    func startRecording() {
+        guard !isRecording else { return }
+        onWillStartRecording?(self)
+
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(self)
+
+        HotKeyManager.shared.suspendForRecording()
+        isRecording = true
+
+        // Local keyDown monitor captures ALL shortcuts (including ⌘ combos that AppKit
+        // otherwise routes to performKeyEquivalent / menu bar instead of keyDown!)
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.isRecording else { return event }
+            self.handleRecordedKeyEvent(event)
+            return nil
+        }
+
+        clickOutsideMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, self.isRecording else { return event }
+            if event.window === self.window {
+                let loc = self.convert(event.locationInWindow, from: nil)
+                if self.bounds.contains(loc) {
+                    return event
+                }
+            }
+            self.stopRecording(resumeHotKeys: true)
+            return event
         }
     }
 
-    override func resignFirstResponder() -> Bool {
+    func stopRecording(resumeHotKeys: Bool = true) {
+        let wasRecording = isRecording
+        if let m = keyMonitor {
+            NSEvent.removeMonitor(m)
+            keyMonitor = nil
+        }
+        if let m = clickOutsideMonitor {
+            NSEvent.removeMonitor(m)
+            clickOutsideMonitor = nil
+        }
         isRecording = false
-        return super.resignFirstResponder()
+        if wasRecording && resumeHotKeys {
+            HotKeyManager.shared.resumeAfterRecording()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if isRecording {
+            stopRecording(resumeHotKeys: true)
+        } else {
+            startRecording()
+        }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard isRecording else { return super.performKeyEquivalent(with: event) }
+        handleRecordedKeyEvent(event)
+        return true
     }
 
     override func keyDown(with event: NSEvent) {
@@ -435,10 +735,15 @@ final class ShortcutRecordButton: NSButton {
             super.keyDown(with: event)
             return
         }
+        handleRecordedKeyEvent(event)
+    }
+
+    func handleRecordedKeyEvent(_ event: NSEvent) {
+        guard isRecording else { return }
 
         let keyCode = event.keyCode
         if keyCode == 53 { // Esc cancels
-            isRecording = false
+            stopRecording(resumeHotKeys: true)
             return
         }
 
@@ -446,8 +751,9 @@ final class ShortcutRecordButton: NSButton {
 
         // Backspace/Delete with no modifiers clears optional shortcuts
         if (keyCode == 51 || keyCode == 117) && flags.isEmpty && actionType != .capture {
-            isRecording = false
+            stopRecording(resumeHotKeys: false)
             onShortcutCleared?(actionType)
+            HotKeyManager.shared.resumeAfterRecording()
             return
         }
 
@@ -468,15 +774,67 @@ final class ShortcutRecordButton: NSButton {
         if flags.contains(.shift) { parts.append("⇧") }
         if flags.contains(.command) { parts.append("⌘") }
 
-        parts.append(formatKeyName(keyCode: keyCode, characters: event.charactersIgnoringModifiers))
+        parts.append(Self.formatKeyName(keyCode: keyCode, characters: event.charactersIgnoringModifiers))
         let displayStr = parts.joined(separator: " + ")
 
-        isRecording = false
+        stopRecording(resumeHotKeys: false)
         onShortcutRecorded?(actionType, UInt32(keyCode), carbonMods, displayStr)
+        HotKeyManager.shared.resumeAfterRecording()
     }
 
-    private func formatKeyName(keyCode: UInt16, characters: String?) -> String {
+    static func formatKeyName(keyCode: UInt16, characters: String?) -> String {
+        // Explicit ANSI virtual keyCode map works reliably even when Chinese Pinyin IME is active
         switch keyCode {
+        case 0: return "A"
+        case 1: return "S"
+        case 2: return "D"
+        case 3: return "F"
+        case 4: return "H"
+        case 5: return "G"
+        case 6: return "Z"
+        case 7: return "X"
+        case 8: return "C"
+        case 9: return "V"
+        case 11: return "B"
+        case 12: return "Q"
+        case 13: return "W"
+        case 14: return "E"
+        case 15: return "R"
+        case 16: return "Y"
+        case 17: return "T"
+        case 18: return "1"
+        case 19: return "2"
+        case 20: return "3"
+        case 21: return "4"
+        case 22: return "6"
+        case 23: return "5"
+        case 24: return "="
+        case 25: return "9"
+        case 26: return "7"
+        case 27: return "-"
+        case 28: return "8"
+        case 29: return "0"
+        case 30: return "]"
+        case 31: return "O"
+        case 32: return "U"
+        case 33: return "["
+        case 34: return "I"
+        case 35: return "P"
+        case 36: return "Return"
+        case 37: return "L"
+        case 38: return "J"
+        case 39: return "'"
+        case 40: return "K"
+        case 41: return ";"
+        case 42: return "\\"
+        case 43: return ","
+        case 44: return "/"
+        case 45: return "N"
+        case 46: return "M"
+        case 47: return "."
+        case 48: return "Tab"
+        case 49: return "Space"
+        case 50: return "`"
         case 122: return "F1"
         case 120: return "F2"
         case 99: return "F3"
@@ -489,9 +847,6 @@ final class ShortcutRecordButton: NSButton {
         case 109: return "F10"
         case 103: return "F11"
         case 111: return "F12"
-        case 49: return "Space"
-        case 36: return "Return"
-        case 48: return "Tab"
         case 123: return "←"
         case 124: return "→"
         case 125: return "↓"
@@ -507,7 +862,7 @@ final class ShortcutRecordButton: NSButton {
 
 // MARK: - Preferences Window
 
-public final class PreferencesWindow: NSWindow {
+public final class PreferencesWindow: NSWindow, NSWindowDelegate {
     public var onPinAppearanceSettingsChanged: (() -> Void)?
 
     private static let windowWidth: CGFloat = 560
@@ -571,6 +926,7 @@ public final class PreferencesWindow: NSWindow {
         self.backgroundColor = .clear
         self.isReleasedWhenClosed = false
         self.level = .floating
+        self.delegate = self
 
         setupUI()
         refreshControlStates()
@@ -578,10 +934,33 @@ public final class PreferencesWindow: NSWindow {
         self.center()
     }
 
+    public func windowWillClose(_ notification: Notification) {
+        stopAllShortcutRecording(resumeHotKeys: true)
+    }
+
+    public func windowDidResignKey(_ notification: Notification) {
+        stopAllShortcutRecording(resumeHotKeys: true)
+    }
+
+    private func stopAllShortcutRecording(except active: ShortcutRecordButton? = nil, resumeHotKeys: Bool = true) {
+        for btn in recorderButtons.values where btn !== active && btn.isRecording {
+            btn.stopRecording(resumeHotKeys: resumeHotKeys)
+        }
+    }
+
     public func selectTab(index: Int, animated: Bool = true) {
+        showTab(index: index, animated: animated, syncTabBar: true)
+    }
+
+    private func showTab(index: Int, animated: Bool, syncTabBar: Bool) {
         guard index >= 0 && index < pages.count else { return }
+        if index != selectedTabIndex {
+            stopAllShortcutRecording(resumeHotKeys: true)
+        }
         selectedTabIndex = index
-        tabBar.setSelected(index: index)
+        if syncTabBar {
+            tabBar.setSelected(index: index, animated: animated)
+        }
 
         for (i, page) in pages.enumerated() {
             page.isHidden = (i != index)
@@ -651,7 +1030,7 @@ public final class PreferencesWindow: NSWindow {
             ("截图与贴图", "camera.viewfinder")
         ])
         tabBar.onSelect = { [weak self] idx in
-            self?.selectTab(index: idx, animated: true)
+            self?.showTab(index: idx, animated: true, syncTabBar: false)
         }
         backdrop.addSubview(tabBar)
 
@@ -766,6 +1145,9 @@ public final class PreferencesWindow: NSWindow {
             recBtn.translatesAutoresizingMaskIntoConstraints = false
             recBtn.widthAnchor.constraint(equalToConstant: 196).isActive = true
             recBtn.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            recBtn.onWillStartRecording = { [weak self] startingBtn in
+                self?.stopAllShortcutRecording(except: startingBtn, resumeHotKeys: false)
+            }
             recBtn.onShortcutRecorded = { [weak self] act, kc, mods, disp in
                 self?.handleShortcutRecorded(action: act, keyCode: kc, modifiers: mods, display: disp)
             }
@@ -1157,6 +1539,7 @@ public final class PreferencesWindow: NSWindow {
     }
 
     @objc private func clearShortcutClicked(_ sender: NSButton) {
+        stopAllShortcutRecording(resumeHotKeys: true)
         guard let action = HotKeyAction(rawValue: UInt32(sender.tag)) else { return }
         HotKeyManager.shared.clearHotKey(action: action)
         recorderButtons[action]?.updateButtonTitle()
@@ -1164,6 +1547,7 @@ public final class PreferencesWindow: NSWindow {
     }
 
     @objc private func resetAllShortcuts() {
+        stopAllShortcutRecording(resumeHotKeys: true)
         HotKeyManager.shared.resetAllToDefault()
         for btn in recorderButtons.values {
             btn.updateButtonTitle()

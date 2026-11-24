@@ -262,6 +262,20 @@ public final class HotKeyManager: @unchecked Sendable {
         }
     }
 
+    /// 录制快捷键期间临时暂停全局热键监听，避免按下既有快捷键时触发截图/贴图而非录入
+    public func suspendForRecording() {
+        unregisterAll()
+    }
+
+    /// 结束录制后恢复所有尚未重新注册的全局热键
+    public func resumeAfterRecording() {
+        for action in HotKeyAction.allCases {
+            if hotKeyRefs[action] == nil, let cfg = configs[action] {
+                _ = register(action: action, config: cfg, persist: false)
+            }
+        }
+    }
+
     /// Validate that a key combination is safe for a global shortcut (F1–F19 allowed bare; other keys require a modifier)
     public static func isValidGlobalShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> Bool {
         let functionKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80]
