@@ -22,22 +22,37 @@ enum PixTheme {
     static let iconDisabled = NSColor(white: 1.0, alpha: 0.24)
     static let textSecondary = NSColor(white: 1.0, alpha: 0.55)
 
-    static let hoverFill = NSColor(white: 1.0, alpha: 0.10)
-    static let pressedFill = NSColor(white: 1.0, alpha: 0.16)
-    static let segmentTrack = NSColor(white: 1.0, alpha: 0.06)
-    static let segmentSelected = NSColor(white: 1.0, alpha: 0.20)
+    static let hoverFill = NSColor(white: 1.0, alpha: 0.12)
+    static let pressedFill = NSColor(white: 1.0, alpha: 0.20)
+    static let segmentTrack = NSColor(white: 1.0, alpha: 0.07)
+    static let segmentSelected = NSColor(white: 1.0, alpha: 0.24)
+    /// Dark tint pushed into the glass so white glyphs stay legible on bright screenshots.
+    static let glassTint = NSColor(srgbRed: 0.06, green: 0.06, blue: 0.08, alpha: 0.66)
+    static let glassScrim = NSColor(srgbRed: 0.07, green: 0.07, blue: 0.09, alpha: 0.55)
     static let separator = NSColor(white: 1.0, alpha: 0.12)
 
     // MARK: Metrics
 
-    static let barHeight: CGFloat = 40
-    static let subBarHeight: CGFloat = 36
-    static let barRadius: CGFloat = 10
-    static let buttonSize: CGFloat = 30
-    static let segmentSize: CGFloat = 26
-    static let buttonRadius: CGFloat = 7
-    static let iconPointSize: CGFloat = 14
+    // Liquid Glass edition: every surface is a capsule, every button a circle.
+    static let barHeight: CGFloat = 42
+    static let subBarHeight: CGFloat = 38
+    static let barRadius: CGFloat = 21          // = barHeight / 2 → capsule
+    static let barInset: CGFloat = 5
+    static let buttonSize: CGFloat = 32         // barHeight - 2 * barInset
+    static let segmentSize: CGFloat = 28
+    static let buttonRadius: CGFloat = 16       // = buttonSize / 2 → circle
+    static let iconPointSize: CGFloat = 15
     static let groupSpacing: CGFloat = 6
+    /// Gap between neighbouring glass capsules in the main bar.
+    static let capsuleGap: CGFloat = 8
+    /// Corner radius of the magnifier / size-tag family so they echo the capsules.
+    static let panelRadius: CGFloat = 16
+
+    /// True when the OS can render native Liquid Glass (NSGlassEffectView).
+    static var supportsLiquidGlass: Bool {
+        if #available(macOS 26.0, *) { return true }
+        return false
+    }
 
     // MARK: Helpers
 
@@ -125,4 +140,75 @@ final class HUDBackgroundView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+/// A capsule of Liquid Glass hosting a horizontal row of controls.
+///
+/// macOS 26+: native `NSGlassEffectView` (refraction, specular rim, adaptive shadow).
+/// macOS 14–25: frosted capsule fallback with a soft top highlight so the shape language still matches.
+final class GlassCapsuleView: NSView {
+    let stack = NSStackView()
+    private let height: CGFloat
+    private var fallbackShadowHost: Bool = false
+
+    init(height: CGFloat, inset: CGFloat, spacing: CGFloat = 2) {
+        self.height = height
+        super.init(frame: NSRect(x: 0, y: 0, width: height, height: height))
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        let radius = height / 2
+        let backdrop: NSView
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.style = .regular
+            glass.cornerRadius = radius
+            glass.tintColor = PixTheme.glassTint
+            glass.appearance = NSAppearance(named: .darkAqua)
+            // Scrim placed *inside* the glass: keeps refraction rim & specular highlight,
+            // but guarantees contrast for white glyphs over bright / busy screenshots.
+            let scrim = NSView()
+            scrim.wantsLayer = true
+            scrim.layer?.backgroundColor = PixTheme.glassScrim.cgColor
+            scrim.layer?.cornerRadius = radius
+            scrim.layer?.cornerCurve = .continuous
+            glass.contentView = scrim
+            backdrop = glass
+        } else {
+            backdrop = HUDBackgroundView(cornerRadius: radius)
+            PixTheme.applyHUDShadow(to: self)
+            fallbackShadowHost = true
+        }
+        backdrop.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(backdrop)
+
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = spacing
+        stack.edgeInsets = NSEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            backdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backdrop.topAnchor.constraint(equalTo: topAnchor),
+            backdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            heightAnchor.constraint(equalToConstant: height)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        if fallbackShadowHost {
+            PixTheme.updateShadowPath(of: self, radius: height / 2)
+        }
+    }
 }

@@ -1199,21 +1199,21 @@ public final class OverlayView: NSView {
             .foregroundColor: NSColor.white
         ]
         let size = (text as NSString).size(withAttributes: attr)
-        let pillW = ceil(size.width) + 16
+        let pillW = ceil(size.width) + 20
         let pillH = ceil(size.height) + 8
 
         let clampedX = min(max(bounds.minX + 6, preferredOrigin.x), bounds.maxX - pillW - 6)
         let clampedY = min(max(bounds.minY + 6, preferredOrigin.y), bounds.maxY - pillH - 6)
         let pillRect = CGRect(x: clampedX, y: clampedY, width: pillW, height: pillH)
 
-        let path = NSBezierPath(roundedRect: pillRect, xRadius: 6, yRadius: 6)
+        let path = NSBezierPath(roundedRect: pillRect, xRadius: pillH / 2, yRadius: pillH / 2)
         PixTheme.hudSolid.setFill()
         path.fill()
         PixTheme.hudBorder.setStroke()
         path.lineWidth = 1
         path.stroke()
 
-        (text as NSString).draw(at: CGPoint(x: pillRect.minX + 8, y: pillRect.minY + 4), withAttributes: attr)
+        (text as NSString).draw(at: CGPoint(x: pillRect.minX + 10, y: pillRect.minY + 4), withAttributes: attr)
     }
 
     private func drawHandles(in ctx: CGContext) {
@@ -1431,8 +1431,8 @@ public final class OverlayView: NSView {
     }
 
     private func positionToolbars() {
-        let margin: CGFloat = 8
-        let gap: CGFloat = 6
+        let margin: CGFloat = 10
+        let gap: CGFloat = 8
         let tbW = toolbar.frame.width
         let tbH = toolbar.frame.height
         let subVisible = !toolbar.subBar.isHidden

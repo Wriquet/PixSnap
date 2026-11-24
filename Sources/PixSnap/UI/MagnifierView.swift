@@ -34,7 +34,7 @@ public final class MagnifierView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: totalW, height: totalH))
 
         wantsLayer = true
-        layer?.cornerRadius = PixTheme.barRadius
+        layer?.cornerRadius = PixTheme.panelRadius
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
         layer?.borderWidth = 1
@@ -137,7 +137,7 @@ public final class MagnifierView: NSView {
 
         // 1. Pixel grid
         ctx.saveGState()
-        let gridPath = CGPath(roundedRect: gridRect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+        let gridPath = CGPath(roundedRect: gridRect, cornerWidth: 9, cornerHeight: 9, transform: nil)
         ctx.addPath(gridPath)
         ctx.clip()
 

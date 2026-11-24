@@ -40,10 +40,10 @@ final class HUDButton: NSButton {
         toolTip: String,
         style: HUDButtonStyle,
         size: CGFloat = PixTheme.buttonSize,
-        cornerRadius: CGFloat = 6
+        cornerRadius: CGFloat? = nil
     ) {
         self.style = style
-        self.cornerRadius = cornerRadius
+        self.cornerRadius = cornerRadius ?? size / 2
         super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
         bezelStyle = .regularSquare
         isBordered = false
@@ -59,7 +59,7 @@ final class HUDButton: NSButton {
         setAccessibilityLabel(toolTip)
 
         wantsLayer = true
-        layer?.cornerRadius = cornerRadius
+        layer?.cornerRadius = self.cornerRadius
         layer?.cornerCurve = .continuous
 
         translatesAutoresizingMaskIntoConstraints = false
@@ -86,7 +86,7 @@ final class HUDButton: NSButton {
         size: CGFloat = PixTheme.buttonSize,
         pointSize: CGFloat = PixTheme.iconPointSize,
         weight: NSFont.Weight = .regular,
-        cornerRadius: CGFloat = 6
+        cornerRadius: CGFloat? = nil
     ) {
         self.init(
             image: PixTheme.symbol(symbol, pointSize: pointSize, weight: weight),
@@ -194,7 +194,7 @@ final class SegmentTrackView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = PixTheme.segmentTrack.cgColor
-        layer?.cornerRadius = 7
+        layer?.cornerRadius = (PixTheme.segmentSize + 4) / 2   // capsule track
         layer?.cornerCurve = .continuous
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -404,8 +404,8 @@ public final class ToolbarSubBar: NSView {
     public private(set) var isFilledShape: Bool = false
     public private(set) var isRectRounded: Bool = false
 
-    private let background = HUDBackgroundView()
-    private let stack = NSStackView()
+    private let capsule = GlassCapsuleView(height: PixTheme.subBarHeight, inset: 3, spacing: PixTheme.groupSpacing)
+    private var stack: NSStackView { capsule.stack }
 
     private var sizeButtons: [StrokeSizePreset: HUDButton] = [:]
     private var sizeTrack: SegmentTrackView!
@@ -452,36 +452,18 @@ public final class ToolbarSubBar: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    public override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        PixTheme.updateShadowPath(of: self)
-    }
-
     public override func viewDidUnhide() {
         super.viewDidUnhide()
         PixTheme.animateAppear(self)
     }
 
     private func setupUI() {
-        PixTheme.applyHUDShadow(to: self)
-        addSubview(background)
-
-        stack.orientation = .horizontal
-        stack.spacing = PixTheme.groupSpacing
-        stack.alignment = .centerY
-        stack.edgeInsets = NSEdgeInsets(top: 3, left: 3, bottom: 3, right: 8)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-
+        wantsLayer = true
+        layer?.masksToBounds = false
+        addSubview(capsule)
         NSLayoutConstraint.activate([
-            background.leadingAnchor.constraint(equalTo: leadingAnchor),
-            background.trailingAnchor.constraint(equalTo: trailingAnchor),
-            background.topAnchor.constraint(equalTo: topAnchor),
-            background.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+            capsule.leadingAnchor.constraint(equalTo: leadingAnchor),
+            capsule.topAnchor.constraint(equalTo: topAnchor)
         ])
 
         // 1. Stroke size segments
@@ -531,8 +513,7 @@ public final class ToolbarSubBar: NSView {
             toolTip: "序号重置为 1",
             style: .plain,
             size: PixTheme.segmentSize,
-            pointSize: 12,
-            cornerRadius: 5
+            pointSize: 12
         )
         resetCounterBtn.target = self
         resetCounterBtn.action = #selector(resetCounterClicked)
@@ -570,7 +551,7 @@ public final class ToolbarSubBar: NSView {
     }
 
     private func makeSegment(image: NSImage?, tip: String, action: Selector) -> HUDButton {
-        let btn = HUDButton(image: image, toolTip: tip, style: .segment, size: PixTheme.segmentSize, cornerRadius: 5)
+        let btn = HUDButton(image: image, toolTip: tip, style: .segment, size: PixTheme.segmentSize)
         btn.target = self
         btn.action = action
         return btn
@@ -598,7 +579,7 @@ public final class ToolbarSubBar: NSView {
 
     private func refitWidth() {
         layoutSubtreeIfNeeded()
-        let fit = stack.fittingSize
+        let fit = capsule.fittingSize
         setFrameSize(NSSize(width: ceil(fit.width), height: PixTheme.subBarHeight))
     }
 
@@ -616,7 +597,7 @@ public final class ToolbarSubBar: NSView {
         fillTrack.isHidden = !showFill
         cornerTrack.isHidden = !showRectCorner
         counterStack.isHidden = !showCounter
-        optionSeparator.isHidden = !(showMosaic || showFill || showCounter)
+        optionSeparator.isHidden = true // capsule tracks already read as separate groups
 
         if showFill {
             let isEllipse = (tool == .ellipse)
@@ -638,7 +619,7 @@ public final class ToolbarSubBar: NSView {
         colorStack.isHidden = !showColor
 
         // Balanced trailing padding: swatches need a little more breathing room than a segmented track
-        let trailing: CGFloat = showColor ? 6 : 3
+        let trailing: CGFloat = showColor ? 8 : 3
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 3, bottom: 3, right: trailing)
 
         refitWidth()
@@ -779,8 +760,7 @@ public final class ToolbarView: NSView {
     public var isFilledShape: Bool { subBar.isFilledShape }
     public var isRectRounded: Bool { subBar.isRectRounded }
 
-    private let background = HUDBackgroundView()
-    private let stack = NSStackView()
+    private let row = NSStackView()
     private var toolButtons: [ToolType: HUDButton] = [:]
     private var undoBtn: HUDButton!
     private var redoBtn: HUDButton!
@@ -792,39 +772,32 @@ public final class ToolbarView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    public override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        PixTheme.updateShadowPath(of: self)
-    }
-
     public override func viewDidUnhide() {
         super.viewDidUnhide()
         PixTheme.animateAppear(self)
     }
 
+    private func makeCapsule() -> GlassCapsuleView {
+        GlassCapsuleView(height: PixTheme.barHeight, inset: PixTheme.barInset, spacing: 2)
+    }
+
     private func setupUI() {
-        PixTheme.applyHUDShadow(to: self)
-        addSubview(background)
+        wantsLayer = true
+        layer?.masksToBounds = false
 
-        stack.orientation = .horizontal
-        stack.spacing = 2
-        stack.alignment = .centerY
-        stack.edgeInsets = NSEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = PixTheme.capsuleGap
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
         NSLayoutConstraint.activate([
-            background.leadingAnchor.constraint(equalTo: leadingAnchor),
-            background.trailingAnchor.constraint(equalTo: trailingAnchor),
-            background.topAnchor.constraint(equalTo: topAnchor),
-            background.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
 
-        // 1. Annotation tools
+        // 1. Annotation tools capsule
+        let toolsCapsule = makeCapsule()
         let tools: [(ToolType, String, String)] = [
             (.rect, "square", "矩形 (1 · 按住 Shift 正方形)"),
             (.ellipse, "circle", "椭圆 (2 · 按住 Shift 正圆)"),
@@ -840,27 +813,29 @@ public final class ToolbarView: NSView {
             btn.target = self
             btn.action = #selector(toolClicked(_:))
             toolButtons[tool] = btn
-            stack.addArrangedSubview(btn)
+            toolsCapsule.stack.addArrangedSubview(btn)
         }
-        addGroupSeparator()
+        row.addArrangedSubview(toolsCapsule)
 
-        // 2. History
-        undoBtn = addPlainButton("arrow.uturn.backward", "撤销 (⌘Z)", #selector(undoClicked))
-        redoBtn = addPlainButton("arrow.uturn.forward", "重做 (⌘⇧Z)", #selector(redoClicked))
+        // 2. History capsule
+        let historyCapsule = makeCapsule()
+        undoBtn = addPlainButton("arrow.uturn.backward", "撤销 (⌘Z)", #selector(undoClicked), to: historyCapsule)
+        redoBtn = addPlainButton("arrow.uturn.forward", "重做 (⌘⇧Z)", #selector(redoClicked), to: historyCapsule)
         undoBtn.isEnabled = false
         redoBtn.isEnabled = false
-        addGroupSeparator()
+        row.addArrangedSubview(historyCapsule)
 
-        // 3. Output actions
-        addPlainButton("pin", "贴图置顶 (T / ⌘P)", #selector(pinClicked))
-        addPlainButton("text.viewfinder", "识别文字 / 二维码 (OCR)", #selector(ocrClicked))
-        addPlainButton("square.and.arrow.down", "另存为 (⌘⇧S) · ⌘S 快速保存", #selector(saveClicked))
-        addGroupSeparator()
+        // 3. Output capsule
+        let outputCapsule = makeCapsule()
+        addPlainButton("pin", "贴图置顶 (T / ⌘P)", #selector(pinClicked), to: outputCapsule)
+        addPlainButton("text.viewfinder", "识别文字 / 二维码 (OCR)", #selector(ocrClicked), to: outputCapsule)
+        addPlainButton("square.and.arrow.down", "另存为 (⌘⇧S) · ⌘S 快速保存", #selector(saveClicked), to: outputCapsule)
+        row.addArrangedSubview(outputCapsule)
 
-        // 4. Exit: cancel + primary Done
-        let cancelBtn = addPlainButton("xmark", "取消 (Esc)", #selector(cancelClicked))
+        // 4. Exit capsule: cancel + primary Done
+        let exitCapsule = makeCapsule()
+        let cancelBtn = addPlainButton("xmark", "取消 (Esc)", #selector(cancelClicked), to: exitCapsule)
         cancelBtn.hoverAccent = PixTheme.destructive
-
         let doneBtn = HUDButton(
             symbol: "checkmark",
             toolTip: "完成并复制 (↵ / ⌘C / 双击)",
@@ -871,7 +846,8 @@ public final class ToolbarView: NSView {
         )
         doneBtn.target = self
         doneBtn.action = #selector(copyClicked)
-        stack.addArrangedSubview(doneBtn)
+        exitCapsule.stack.addArrangedSubview(doneBtn)
+        row.addArrangedSubview(exitCapsule)
 
         // Wire subBar callbacks
         subBar.onSizeSelected = { [weak self] preset in self?.onSizeSelected?(preset) }
@@ -882,26 +858,17 @@ public final class ToolbarView: NSView {
         subBar.onResetCounter = { [weak self] in self?.onResetCounter?() }
 
         layoutSubtreeIfNeeded()
-        let fit = stack.fittingSize
+        let fit = row.fittingSize
         setFrameSize(NSSize(width: ceil(fit.width), height: PixTheme.barHeight))
     }
 
     @discardableResult
-    private func addPlainButton(_ symbol: String, _ tip: String, _ action: Selector) -> HUDButton {
+    private func addPlainButton(_ symbol: String, _ tip: String, _ action: Selector, to capsule: GlassCapsuleView) -> HUDButton {
         let btn = HUDButton(symbol: symbol, toolTip: tip, style: .plain)
         btn.target = self
         btn.action = action
-        stack.addArrangedSubview(btn)
+        capsule.stack.addArrangedSubview(btn)
         return btn
-    }
-
-    private func addGroupSeparator() {
-        if let last = stack.arrangedSubviews.last {
-            stack.setCustomSpacing(PixTheme.groupSpacing, after: last)
-        }
-        let sep = makeSeparator(height: 18)
-        stack.addArrangedSubview(sep)
-        stack.setCustomSpacing(PixTheme.groupSpacing, after: sep)
     }
 
     public func setActiveTool(_ tool: ToolType, notify: Bool = true) {
