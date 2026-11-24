@@ -53,10 +53,16 @@ public final class OverlayWindow: NSPanel {
         container.addSubview(bgView)
         container.addSubview(overlayView)
         self.contentView = container
+        self.initialFirstResponder = overlayView
+        self.makeFirstResponder(overlayView)
     }
 
     public override var canBecomeKey: Bool { true }
     public override var canBecomeMain: Bool { true }
+
+    public override func cancelOperation(_ sender: Any?) {
+        overlayView.cancelOperation(sender)
+    }
 
     public func closeOverlay() {
         overlayView.cleanup()

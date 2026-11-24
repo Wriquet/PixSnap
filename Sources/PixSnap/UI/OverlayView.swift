@@ -318,8 +318,7 @@ public final class OverlayView: NSView {
         toolbar.onOCR = { [weak self] in self?.finishOCR() }
         toolbar.onSave = { [weak self] in self?.finishSaveAs() }
         toolbar.onCancel = { [weak self] in
-            self?.cancelInlineText()
-            self?.onCloseAll?()
+            self?.cancelCapture()
         }
     }
 
@@ -471,6 +470,7 @@ public final class OverlayView: NSView {
         if state == .hovering && !isActiveHoverScreen {
             isActiveHoverScreen = true
             window?.makeKeyAndOrderFront(nil)
+            window?.makeFirstResponder(self)
             onBecameActiveScreen?()
         }
     }
@@ -483,6 +483,7 @@ public final class OverlayView: NSView {
             if !isActiveHoverScreen {
                 isActiveHoverScreen = true
                 window?.makeKeyAndOrderFront(nil)
+                window?.makeFirstResponder(self)
                 onBecameActiveScreen?()
             }
             if AppSettings.shared.enableWindowDetection {
@@ -889,6 +890,19 @@ public final class OverlayView: NSView {
         needsDisplay = true
     }
 
+    public override func cancelOperation(_ sender: Any?) {
+        if activeTextField != nil {
+            cancelInlineText()
+        } else {
+            cancelCapture()
+        }
+    }
+
+    private func cancelCapture() {
+        cancelInlineText()
+        onCloseAll?()
+    }
+
     // MARK: - Keyboard Events
 
     public override func keyDown(with event: NSEvent) {
@@ -900,20 +914,9 @@ public final class OverlayView: NSView {
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         let char = event.charactersIgnoringModifiers?.lowercased()
 
-        // Esc: layered back-out
+        // Esc: always exit capture directly (inline text editing handles its own Esc in InlineTextField)
         if event.keyCode == 53 {
-            if selectedAnnotationID != nil {
-                selectedAnnotationID = nil
-                updateSubBarVisibility()
-                needsDisplay = true
-            } else if toolbar.activeTool != .none {
-                toolbar.setActiveTool(.none)
-            } else if state == .selected {
-                let mouse = convert(window?.mouseLocationOutsideOfEventStream ?? .zero, from: nil)
-                resetToHover(at: mouse)
-            } else {
-                onCloseAll?()
-            }
+            cancelCapture()
             return
         }
 
