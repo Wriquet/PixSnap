@@ -17,19 +17,29 @@ enum PixTheme {
     static let hudSolid = NSColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 0.94)
     static let hudBorder = NSColor(white: 1.0, alpha: 0.12)
 
-    static let icon = NSColor(white: 1.0, alpha: 0.88)
-    static let iconSecondary = NSColor(white: 1.0, alpha: 0.55)
-    static let iconDisabled = NSColor(white: 1.0, alpha: 0.24)
-    static let textSecondary = NSColor(white: 1.0, alpha: 0.55)
+    // Glass-hosted tokens are *dynamic*: clear Liquid Glass flips between a light and a dark
+    // rendition depending on what is behind it, and glyphs must follow (dark on light, light on dark).
+    static let icon = dynamic(light: (0.0, 0.82), dark: (1.0, 0.92))
+    static let iconSecondary = dynamic(light: (0.0, 0.50), dark: (1.0, 0.60))
+    static let iconDisabled = dynamic(light: (0.0, 0.22), dark: (1.0, 0.26))
+    static let textSecondary = dynamic(light: (0.0, 0.55), dark: (1.0, 0.62))
 
-    static let hoverFill = NSColor(white: 1.0, alpha: 0.12)
-    static let pressedFill = NSColor(white: 1.0, alpha: 0.20)
-    static let segmentTrack = NSColor(white: 1.0, alpha: 0.07)
-    static let segmentSelected = NSColor(white: 1.0, alpha: 0.24)
-    /// Dark tint pushed into the glass so white glyphs stay legible on bright screenshots.
-    static let glassTint = NSColor(srgbRed: 0.06, green: 0.06, blue: 0.08, alpha: 0.66)
-    static let glassScrim = NSColor(srgbRed: 0.07, green: 0.07, blue: 0.09, alpha: 0.55)
-    static let separator = NSColor(white: 1.0, alpha: 0.12)
+    static let hoverFill = dynamic(light: (0.0, 0.07), dark: (1.0, 0.13))
+    static let pressedFill = dynamic(light: (0.0, 0.13), dark: (1.0, 0.21))
+    static let segmentTrack = dynamic(light: (0.0, 0.05), dark: (1.0, 0.08))
+    static let segmentSelected = dynamic(light: (1.0, 0.92), dark: (1.0, 0.26))
+    static let separator = dynamic(light: (0.0, 0.12), dark: (1.0, 0.15))
+    static let swatchHairline = dynamic(light: (0.0, 0.18), dark: (1.0, 0.30))
+    static let swatchRing = dynamic(light: (0.0, 0.78), dark: (1.0, 1.0))
+
+    /// (white, alpha) pairs → appearance-aware color.
+    private static func dynamic(light: (CGFloat, CGFloat), dark: (CGFloat, CGFloat)) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let v = isDark ? dark : light
+            return NSColor(white: v.0, alpha: v.1)
+        }
+    }
 
     // MARK: Metrics
 
@@ -160,25 +170,29 @@ final class GlassCapsuleView: NSView {
 
         let radius = height / 2
         let backdrop: NSView
+        let host: NSView            // where the controls live
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
             glass.style = .regular
             glass.cornerRadius = radius
-            glass.tintColor = PixTheme.glassTint
-            glass.appearance = NSAppearance(named: .darkAqua)
-            // Scrim placed *inside* the glass: keeps refraction rim & specular highlight,
-            // but guarantees contrast for white glyphs over bright / busy screenshots.
-            let scrim = NSView()
-            scrim.wantsLayer = true
-            scrim.layer?.backgroundColor = PixTheme.glassScrim.cgColor
-            scrim.layer?.cornerRadius = radius
-            scrim.layer?.cornerCurve = .continuous
-            glass.contentView = scrim
+            // Controls go *inside* the glass so they inherit its adaptive light/dark rendition.
+            let content = NSView()
+            content.translatesAutoresizingMaskIntoConstraints = false
+            glass.contentView = content
+            NSLayoutConstraint.activate([
+                content.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
+                content.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
+                content.topAnchor.constraint(equalTo: glass.topAnchor),
+                content.bottomAnchor.constraint(equalTo: glass.bottomAnchor)
+            ])
             backdrop = glass
+            host = content
         } else {
             backdrop = HUDBackgroundView(cornerRadius: radius)
+            appearance = NSAppearance(named: .darkAqua) // frosted fallback is always dark
             PixTheme.applyHUDShadow(to: self)
             fallbackShadowHost = true
+            host = self
         }
         backdrop.translatesAutoresizingMaskIntoConstraints = false
         addSubview(backdrop)
@@ -188,7 +202,7 @@ final class GlassCapsuleView: NSView {
         stack.spacing = spacing
         stack.edgeInsets = NSEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        host.addSubview(stack)
 
         NSLayoutConstraint.activate([
             backdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -196,9 +210,9 @@ final class GlassCapsuleView: NSView {
             backdrop.topAnchor.constraint(equalTo: topAnchor),
             backdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: host.centerYAnchor),
             heightAnchor.constraint(equalToConstant: height)
         ])
     }

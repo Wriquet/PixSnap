@@ -129,12 +129,18 @@ final class HUDButton: NSButton {
         refresh(animated: false)
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refresh(animated: false)
+    }
+
     private func refresh(animated: Bool) {
         let (bg, tint) = resolveColors()
         contentTintColor = tint
 
         guard let layer else { return }
-        let newColor = bg.cgColor
+        var newColor = bg.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { newColor = bg.cgColor }
         if animated {
             let old = layer.presentation()?.backgroundColor ?? layer.backgroundColor
             layer.backgroundColor = newColor
@@ -160,17 +166,17 @@ final class HUDButton: NSButton {
                 let bg = isPressed ? PixTheme.accent.blended(withFraction: 0.18, of: .black) ?? PixTheme.accent : PixTheme.accent
                 return (bg, .white)
             }
-            return (neutralBg, isHovered ? .white : PixTheme.icon)
+            return (neutralBg, PixTheme.icon)
 
         case .segment:
-            if isOn { return (PixTheme.segmentSelected, .white) }
+            if isOn { return (PixTheme.segmentSelected, PixTheme.icon) }
             return (neutralBg, isHovered ? PixTheme.icon : PixTheme.iconSecondary)
 
         case .plain:
             if let accent = hoverAccent, isHovered {
                 return (accent.withAlphaComponent(isPressed ? 0.30 : 0.20), accent)
             }
-            return (neutralBg, isHovered ? .white : PixTheme.icon)
+            return (neutralBg, PixTheme.icon)
 
         case .primary:
             let bg: NSColor
@@ -190,10 +196,12 @@ final class HUDButton: NSButton {
 final class SegmentTrackView: NSView {
     let stack = NSStackView()
 
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() { layer?.backgroundColor = PixTheme.segmentTrack.cgColor }
+
     init(_ buttons: [NSView]) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = PixTheme.segmentTrack.cgColor
         layer?.cornerRadius = (PixTheme.segmentSize + 4) / 2   // capsule track
         layer?.cornerCurve = .continuous
         translatesAutoresizingMaskIntoConstraints = false
@@ -260,13 +268,13 @@ final class ColorSwatchButton: NSButton {
         ctx.setFillColor(swatchColor.cgColor)
         ctx.fillEllipse(in: dot)
 
-        // Hairline so white / dark-gray swatches stay visible on the HUD
-        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.28).cgColor)
+        // Hairline so white / dark-gray swatches stay visible on light *and* dark glass
+        ctx.setStrokeColor(PixTheme.swatchHairline.cgColor)
         ctx.setLineWidth(0.75)
         ctx.strokeEllipse(in: dot.insetBy(dx: 0.375, dy: 0.375))
 
         if isSelectedColor {
-            ctx.setStrokeColor(NSColor.white.cgColor)
+            ctx.setStrokeColor(PixTheme.swatchRing.cgColor)
             ctx.setLineWidth(1.5)
             ctx.strokeEllipse(in: bounds.insetBy(dx: 1.75, dy: 1.75))
         }
@@ -375,11 +383,16 @@ private enum ToolbarGlyphs {
     }
 }
 
+/// Hairline divider whose color follows the glass' light / dark rendition.
+private final class SeparatorView: NSView {
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() { layer?.backgroundColor = PixTheme.separator.cgColor }
+}
+
 @MainActor
 private func makeSeparator(height: CGFloat) -> NSView {
-    let sep = NSView()
+    let sep = SeparatorView()
     sep.wantsLayer = true
-    sep.layer?.backgroundColor = PixTheme.separator.cgColor
     sep.layer?.cornerRadius = 0.5
     sep.translatesAutoresizingMaskIntoConstraints = false
     sep.widthAnchor.constraint(equalToConstant: 1).isActive = true

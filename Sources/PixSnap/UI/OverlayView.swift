@@ -1473,6 +1473,58 @@ public final class OverlayView: NSView {
             subX = max(bounds.minX + margin, min(bounds.maxX - subW - margin, subX))
             toolbar.subBar.frame.origin = CGPoint(x: round(subX), y: round(subY))
         }
+        updateToolbarGlassAppearance()
+    }
+
+    // MARK: - Adaptive Liquid Glass (light glass on bright backdrops, dark glass on dark ones)
+
+    private func updateToolbarGlassAppearance() {
+        guard PixTheme.supportsLiquidGlass, !toolbar.isHidden else { return }
+        var area = toolbar.frame
+        if !toolbar.subBar.isHidden { area = area.union(toolbar.subBar.frame) }
+        let luminance = backdropLuminance(in: area)
+        let name: NSAppearance.Name = luminance > 0.5 ? .aqua : .darkAqua
+        guard toolbar.appearance?.name != name else { return }
+        let appearance = NSAppearance(named: name)
+        toolbar.appearance = appearance
+        toolbar.subBar.appearance = appearance
+    }
+
+    /// Average perceived luminance (0…1) of what is visible behind `rect`, including the dim mask.
+    private func backdropLuminance(in rect: CGRect) -> CGFloat {
+        let img = capturedScreen.image
+        let r = rect.intersection(bounds)
+        guard !r.isNull, r.width >= 2, r.height >= 2, bounds.width > 0, bounds.height > 0 else { return 0.5 }
+        let sx = CGFloat(img.width) / bounds.width
+        let sy = CGFloat(img.height) / bounds.height
+        let pixelRect = CGRect(
+            x: r.minX * sx,
+            y: (bounds.height - r.maxY) * sy,
+            width: r.width * sx,
+            height: r.height * sy
+        ).integral
+        guard let crop = img.cropping(to: pixelRect),
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return 0.5 }
+
+        let w = 24, h = 6
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        let sum: CGFloat = bytes.withUnsafeMutableBytes { buf -> CGFloat in
+            guard let ctx = CGContext(
+                data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return CGFloat(w * h) * 0.5 }
+            ctx.interpolationQuality = .low
+            ctx.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
+            var total: CGFloat = 0
+            for i in stride(from: 0, to: w * h * 4, by: 4) {
+                total += (0.2126 * CGFloat(buf[i]) + 0.7152 * CGFloat(buf[i + 1]) + 0.0722 * CGFloat(buf[i + 2])) / 255.0
+            }
+            return total
+        }
+        let average = sum / CGFloat(w * h)
+        // Toolbars normally float over the 42 % black dim mask; inside the selection they see raw pixels.
+        let overSelection = selectionRect.contains(CGPoint(x: rect.midX, y: rect.midY))
+        return overSelection ? average : average * 0.58
     }
 
     // MARK: - Final Export & Actions
