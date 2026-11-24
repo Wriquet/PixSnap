@@ -31,12 +31,8 @@ public final class StatusBarController: NSObject {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            if let img = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "PixSnap") {
-                img.isTemplate = true
-                button.image = img
-            } else {
-                button.title = "PixSnap"
-            }
+            button.image = Self.makeCropStatusIcon()
+            button.image?.accessibilityDescription = "PixSnap"
         }
 
         let menu = NSMenu()
@@ -44,7 +40,7 @@ public final class StatusBarController: NSObject {
 
         captureMenuItem = NSMenuItem(title: "", action: #selector(captureClicked), keyEquivalent: "")
         captureMenuItem.target = self
-        captureMenuItem.image = menuIcon("camera.viewfinder")
+        captureMenuItem.image = menuIcon("crop")
         menu.addItem(captureMenuItem)
 
         ocrMenuItem = NSMenuItem(title: "", action: #selector(ocrCaptureClicked), keyEquivalent: "")
@@ -106,6 +102,44 @@ public final class StatusBarController: NSObject {
         statusItem.menu = menu
         refreshShortcutTitles()
         updatePinHistory([])
+    }
+
+    /// 极简裁切框矢量菜单栏图标（18×18pt template，自动适配深/浅色菜单栏与 Retina 屏）
+    private static func makeCropStatusIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let img = NSImage(size: size, flipped: false) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.setStrokeColor(NSColor.black.cgColor)
+            ctx.setLineWidth(1.75)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+
+            // Left & bottom-extending L
+            let p1 = CGMutablePath()
+            p1.move(to: CGPoint(x: 5.0, y: 15.8))
+            p1.addLine(to: CGPoint(x: 5.0, y: 6.2))
+            p1.addArc(tangent1End: CGPoint(x: 5.0, y: 5.0), tangent2End: CGPoint(x: 6.2, y: 5.0), radius: 1.2)
+            p1.addLine(to: CGPoint(x: 15.8, y: 5.0))
+            ctx.addPath(p1)
+            ctx.strokePath()
+
+            // Top & right-extending L with crisp gap at intersections
+            let p2 = CGMutablePath()
+            p2.move(to: CGPoint(x: 2.2, y: 13.0))
+            p2.addLine(to: CGPoint(x: 3.0, y: 13.0))
+            p2.move(to: CGPoint(x: 7.4, y: 13.0))
+            p2.addLine(to: CGPoint(x: 11.8, y: 13.0))
+            p2.addArc(tangent1End: CGPoint(x: 13.0, y: 13.0), tangent2End: CGPoint(x: 13.0, y: 11.8), radius: 1.2)
+            p2.addLine(to: CGPoint(x: 13.0, y: 7.4))
+            p2.move(to: CGPoint(x: 13.0, y: 3.0))
+            p2.addLine(to: CGPoint(x: 13.0, y: 2.2))
+            ctx.addPath(p2)
+            ctx.strokePath()
+
+            return true
+        }
+        img.isTemplate = true
+        return img
     }
 
     private func menuIcon(_ symbolName: String) -> NSImage? {
