@@ -35,7 +35,7 @@ public final class StatusBarController: NSObject {
                 img.isTemplate = true
                 button.image = img
             } else {
-                button.title = "📸"
+                button.title = "PixSnap"
             }
         }
 
@@ -44,48 +44,57 @@ public final class StatusBarController: NSObject {
 
         captureMenuItem = NSMenuItem(title: "", action: #selector(captureClicked), keyEquivalent: "")
         captureMenuItem.target = self
+        captureMenuItem.image = menuIcon("camera.viewfinder")
         menu.addItem(captureMenuItem)
 
         ocrMenuItem = NSMenuItem(title: "", action: #selector(ocrCaptureClicked), keyEquivalent: "")
         ocrMenuItem.target = self
+        ocrMenuItem.image = menuIcon("text.viewfinder")
         menu.addItem(ocrMenuItem)
 
         pinClipboardMenuItem = NSMenuItem(title: "", action: #selector(pinClipboardClicked), keyEquivalent: "")
         pinClipboardMenuItem.target = self
+        pinClipboardMenuItem.image = menuIcon("clipboard")
         menu.addItem(pinClipboardMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
         restoreLatestPinMenuItem = NSMenuItem(title: "", action: #selector(restoreLatestPinClicked), keyEquivalent: "")
         restoreLatestPinMenuItem.target = self
+        restoreLatestPinMenuItem.image = menuIcon("arrow.uturn.backward")
         restoreLatestPinMenuItem.isEnabled = false
         menu.addItem(restoreLatestPinMenuItem)
 
         recentPinsSubmenu = NSMenu(title: "最近关闭的贴图")
         recentPinsSubmenu.autoenablesItems = false
-        recentPinsMenuItem = NSMenuItem(title: "🕘 最近关闭的贴图", action: nil, keyEquivalent: "")
+        recentPinsMenuItem = NSMenuItem(title: "最近关闭的贴图", action: nil, keyEquivalent: "")
+        recentPinsMenuItem.image = menuIcon("clock.arrow.circlepath")
         recentPinsMenuItem.submenu = recentPinsSubmenu
         recentPinsMenuItem.isEnabled = false
         menu.addItem(recentPinsMenuItem)
 
-        closePinsMenuItem = NSMenuItem(title: "📌 关闭所有贴图", action: #selector(closePinsClicked), keyEquivalent: "")
+        closePinsMenuItem = NSMenuItem(title: "关闭所有贴图", action: #selector(closePinsClicked), keyEquivalent: "")
         closePinsMenuItem.target = self
+        closePinsMenuItem.image = menuIcon("pin.slash")
         closePinsMenuItem.isEnabled = false
         menu.addItem(closePinsMenuItem)
 
-        restoreClickThroughMenuItem = NSMenuItem(title: "👆 恢复鼠标穿透贴图", action: #selector(restoreClickThroughClicked), keyEquivalent: "")
+        restoreClickThroughMenuItem = NSMenuItem(title: "恢复鼠标穿透贴图", action: #selector(restoreClickThroughClicked), keyEquivalent: "")
         restoreClickThroughMenuItem.target = self
+        restoreClickThroughMenuItem.image = menuIcon("cursorarrow.click")
         restoreClickThroughMenuItem.isHidden = true
         menu.addItem(restoreClickThroughMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
-        let prefsItem = NSMenuItem(title: "⚙️ 偏好设置...", action: #selector(preferencesClicked), keyEquivalent: ",")
+        let prefsItem = NSMenuItem(title: "偏好设置...", action: #selector(preferencesClicked), keyEquivalent: ",")
         prefsItem.target = self
+        prefsItem.image = menuIcon("gearshape")
         menu.addItem(prefsItem)
 
-        let aboutItem = NSMenuItem(title: "ℹ️ 关于 PixSnap", action: #selector(aboutClicked), keyEquivalent: "")
+        let aboutItem = NSMenuItem(title: "关于 PixSnap", action: #selector(aboutClicked), keyEquivalent: "")
         aboutItem.target = self
+        aboutItem.image = menuIcon("info.circle")
         menu.addItem(aboutItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -99,30 +108,38 @@ public final class StatusBarController: NSObject {
         updatePinHistory([])
     }
 
+    private func menuIcon(_ symbolName: String) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+        img?.isTemplate = true
+        return img
+    }
+
     public func refreshShortcutTitles() {
         let capKey = HotKeyManager.shared.displayString(for: .capture)
         let ocrKey = HotKeyManager.shared.displayString(for: .ocrCapture)
         let pinKey = HotKeyManager.shared.displayString(for: .pinClipboard)
         let restoreKey = HotKeyManager.shared.displayString(for: .restorePin)
 
-        captureMenuItem?.title = "📸 区域截图 (\(capKey))"
-        ocrMenuItem?.title = "📝 截图识别文字 OCR (\(ocrKey))"
-        pinClipboardMenuItem?.title = "📋 贴剪贴板图片 / 文字 (\(pinKey))"
-        restoreLatestPinMenuItem?.title = "↩️ 恢复上一张贴图 (\(restoreKey))"
+        captureMenuItem?.title = "区域截图 (\(capKey))"
+        ocrMenuItem?.title = "截图识别文字 OCR (\(ocrKey))"
+        pinClipboardMenuItem?.title = "贴剪贴板图片 / 文字 (\(pinKey))"
+        restoreLatestPinMenuItem?.title = "恢复上一张贴图 (\(restoreKey))"
         statusItem.button?.toolTip = "PixSnap 截图与贴图 (\(capKey))"
     }
 
     public func updatePinCounts(total: Int, clickThroughCount: Int) {
         if total > 0 {
-            closePinsMenuItem.title = "📌 关闭所有贴图 (\(total))"
+            closePinsMenuItem.title = "关闭所有贴图 (\(total))"
             closePinsMenuItem.isEnabled = true
         } else {
-            closePinsMenuItem.title = "📌 关闭所有贴图"
+            closePinsMenuItem.title = "关闭所有贴图"
             closePinsMenuItem.isEnabled = false
         }
 
         if clickThroughCount > 0 {
-            restoreClickThroughMenuItem.title = "👆 恢复鼠标穿透贴图 (\(clickThroughCount))"
+            restoreClickThroughMenuItem.title = "恢复鼠标穿透贴图 (\(clickThroughCount))"
             restoreClickThroughMenuItem.isHidden = false
             restoreClickThroughMenuItem.isEnabled = true
         } else {
@@ -134,7 +151,7 @@ public final class StatusBarController: NSObject {
         let hasHistory = !records.isEmpty
         restoreLatestPinMenuItem.isEnabled = hasHistory
         recentPinsMenuItem.isEnabled = hasHistory
-        recentPinsMenuItem.title = hasHistory ? "🕘 最近关闭的贴图 (\(records.count))" : "🕘 最近关闭的贴图"
+        recentPinsMenuItem.title = hasHistory ? "最近关闭的贴图 (\(records.count))" : "最近关闭的贴图"
 
         recentPinsSubmenu.removeAllItems()
         if records.isEmpty {
@@ -160,6 +177,7 @@ public final class StatusBarController: NSObject {
         recentPinsSubmenu.addItem(NSMenuItem.separator())
         let clearItem = NSMenuItem(title: "清空贴图历史", action: #selector(clearHistoryClicked), keyEquivalent: "")
         clearItem.target = self
+        clearItem.image = menuIcon("trash")
         recentPinsSubmenu.addItem(clearItem)
     }
 
