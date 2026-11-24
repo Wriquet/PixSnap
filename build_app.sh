@@ -11,6 +11,15 @@ echo "📦 正在打包 PixSnap.app..."
 mkdir -p PixSnap.app/Contents/MacOS PixSnap.app/Contents/Resources
 cp .build/release/PixSnap PixSnap.app/Contents/MacOS/PixSnap
 
+# SwiftPM 默认把 LC_BUILD_VERSION 的 sdk 写成 Package.swift 的最低平台版本 (14.0)，
+# 会导致 macOS 26+ 以旧版兼容模式渲染所有系统控件；这里写入本机 SDK 版本以启用原生 Liquid Glass。
+SDK_VER="$(xcrun --show-sdk-version 2>/dev/null || true)"
+if [ -n "$SDK_VER" ] && command -v vtool >/dev/null 2>&1; then
+    vtool -set-build-version macos 14.0 "$SDK_VER" -replace \
+        -output PixSnap.app/Contents/MacOS/PixSnap PixSnap.app/Contents/MacOS/PixSnap 2>/dev/null
+    echo "✨ 已写入目标 SDK 版本 ($SDK_VER) 以启用原生 Liquid Glass 控件样式"
+fi
+
 echo "🔏 正在进行稳定代码签名..."
 # 可通过 PIXSNAP_SIGN_IDENTITY 指定签名证书；未指定时自动选用钥匙串中的第一个 Apple Development 证书
 CERT="${PIXSNAP_SIGN_IDENTITY:-$(security find-identity -p codesigning -v | grep -m1 "Apple Development" | sed -E 's/.*"(.*)"/\1/')}"

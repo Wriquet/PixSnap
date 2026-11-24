@@ -1,6 +1,383 @@
 import Cocoa
 import Carbon
 
+// MARK: - Glass Styled Control Helpers
+
+@MainActor
+private func applyGlassButtonStyle(_ button: NSButton, capsule: Bool = true) {
+    if #available(macOS 26.0, *) {
+        button.bezelStyle = .glass
+        if capsule {
+            button.borderShape = .capsule
+        }
+    } else {
+        button.bezelStyle = .rounded
+    }
+}
+
+@MainActor
+private func makeGlassButton(
+    title: String,
+    symbol: String? = nil,
+    controlSize: NSControl.ControlSize = .regular,
+    target: AnyObject?,
+    action: Selector
+) -> NSButton {
+    let btn = NSButton(title: title, target: target, action: action)
+    applyGlassButtonStyle(btn, capsule: true)
+    btn.controlSize = controlSize
+    btn.font = NSFont.systemFont(ofSize: controlSize == .small ? 11.5 : 12.5, weight: .medium)
+    if let symbol {
+        let pt: CGFloat = controlSize == .small ? 11 : 12
+        let cfg = NSImage.SymbolConfiguration(pointSize: pt, weight: .medium)
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+            img.isTemplate = true
+            btn.image = img
+            btn.imagePosition = .imageLeading
+        }
+    }
+    return btn
+}
+
+@MainActor
+private func applyCapsuleSegmentStyle(_ seg: NSSegmentedControl) {
+    seg.segmentStyle = .rounded
+    if #available(macOS 26.0, *) {
+        seg.borderShape = .capsule
+    }
+}
+
+@MainActor
+private func applyGlassPopupStyle(_ popup: NSPopUpButton) {
+    if #available(macOS 26.0, *) {
+        popup.bezelStyle = .glass
+        popup.borderShape = .capsule
+    }
+    popup.font = NSFont.systemFont(ofSize: 12.5, weight: .regular)
+}
+
+// MARK: - Translucent Grouped Card
+
+private final class SettingsCardView: NSView {
+    let stack = NSStackView()
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        layer?.backgroundColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.065)
+            : NSColor.white.withAlphaComponent(0.62)).cgColor
+        layer?.borderColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.11)
+            : NSColor.black.withAlphaComponent(0.07)).cgColor
+    }
+
+    init(rows: [NSView]) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 14
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1
+
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+
+        for (index, row) in rows.enumerated() {
+            row.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+            if index < rows.count - 1 {
+                let dividerWrap = NSView()
+                dividerWrap.translatesAutoresizingMaskIntoConstraints = false
+                let divider = CardDividerView()
+                dividerWrap.addSubview(divider)
+                NSLayoutConstraint.activate([
+                    dividerWrap.heightAnchor.constraint(equalToConstant: 1),
+                    divider.leadingAnchor.constraint(equalTo: dividerWrap.leadingAnchor, constant: 14),
+                    divider.trailingAnchor.constraint(equalTo: dividerWrap.trailingAnchor, constant: -14),
+                    divider.topAnchor.constraint(equalTo: dividerWrap.topAnchor),
+                    divider.bottomAnchor.constraint(equalTo: dividerWrap.bottomAnchor)
+                ])
+                stack.addArrangedSubview(dividerWrap)
+                dividerWrap.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            }
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+private final class CardDividerView: NSView {
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        layer?.backgroundColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.09)
+            : NSColor.black.withAlphaComponent(0.07)).cgColor
+    }
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+// MARK: - Liquid Glass Capsule Tab Bar
+
+private final class GlassTabButton: NSButton {
+    var isSelectedTab: Bool = false {
+        didSet { if oldValue != isSelectedTab { refresh(animated: true) } }
+    }
+    private var isHovered = false
+    private let pillLayer = CALayer()
+    private let iconView = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+
+    init(title: String, symbol: String) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        isBordered = false
+        bezelStyle = .regularSquare
+        self.title = ""
+        setAccessibilityLabel(title)
+        if let cell = cell as? NSButtonCell {
+            cell.highlightsBy = []
+            cell.showsStateBy = []
+        }
+
+        wantsLayer = true
+        layer?.cornerRadius = 15
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = false
+
+        pillLayer.cornerRadius = 15
+        pillLayer.cornerCurve = .continuous
+        layer?.insertSublayer(pillLayer, at: 0)
+
+        let cfg = NSImage.SymbolConfiguration(pointSize: 12.5, weight: .medium)
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+            img.isTemplate = true
+            iconView.image = img
+        }
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+
+        label.stringValue = title
+        label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        label.setContentHuggingPriority(.required, for: .horizontal)
+
+        let contentStack = NSStackView(views: [iconView, label])
+        contentStack.orientation = .horizontal
+        contentStack.alignment = .centerY
+        contentStack.spacing = 5
+        contentStack.edgeInsets = NSEdgeInsets(top: 0, left: 13, bottom: 0, right: 14)
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(contentStack)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 30),
+            contentStack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contentStack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+        refresh(animated: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pillLayer.frame = bounds
+        CATransaction.commit()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        refresh(animated: true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        refresh(animated: true)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refresh(animated: false)
+    }
+
+    private func refresh(animated: Bool) {
+        let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+
+        let textColor: NSColor
+        let iconColor: NSColor
+        let fill: NSColor
+        let shadowOpacity: Float
+
+        if isSelectedTab {
+            textColor = isDark ? .white : NSColor(white: 0.08, alpha: 1.0)
+            iconColor = isDark ? .white : PixTheme.accent
+            fill = isDark
+                ? NSColor.white.withAlphaComponent(0.22)
+                : NSColor.white.withAlphaComponent(0.90)
+            shadowOpacity = isDark ? 0.24 : 0.12
+        } else if isHovered {
+            textColor = isDark ? NSColor.white.withAlphaComponent(0.92) : NSColor(white: 0.14, alpha: 1.0)
+            iconColor = textColor
+            fill = isDark
+                ? NSColor.white.withAlphaComponent(0.09)
+                : NSColor.black.withAlphaComponent(0.05)
+            shadowOpacity = 0
+        } else {
+            textColor = isDark ? NSColor.white.withAlphaComponent(0.68) : NSColor(white: 0.26, alpha: 0.86)
+            iconColor = textColor
+            fill = .clear
+            shadowOpacity = 0
+        }
+
+        label.font = NSFont.systemFont(ofSize: 12.5, weight: isSelectedTab ? .semibold : .medium)
+        label.textColor = textColor
+        iconView.contentTintColor = iconColor
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(!animated)
+        CATransaction.setAnimationDuration(0.16)
+        pillLayer.backgroundColor = fill.cgColor
+        pillLayer.shadowColor = NSColor.black.cgColor
+        pillLayer.shadowOpacity = shadowOpacity
+        pillLayer.shadowRadius = 4
+        pillLayer.shadowOffset = CGSize(width: 0, height: -1)
+        CATransaction.commit()
+    }
+}
+
+private final class GlassTabBar: NSView {
+    var onSelect: ((Int) -> Void)?
+    private var buttons: [GlassTabButton] = []
+
+    init(items: [(title: String, symbol: String)]) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        let height: CGFloat = 38
+        let radius: CGFloat = height / 2
+
+        let backdrop: NSView
+        let host: NSView
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.style = .regular
+            glass.cornerRadius = radius
+            if #available(macOS 27.0, *) {
+                glass.effectIsInteractive = true
+            }
+            let content = NSView()
+            content.translatesAutoresizingMaskIntoConstraints = false
+            glass.contentView = content
+            NSLayoutConstraint.activate([
+                content.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
+                content.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
+                content.topAnchor.constraint(equalTo: glass.topAnchor),
+                content.bottomAnchor.constraint(equalTo: glass.bottomAnchor)
+            ])
+            backdrop = glass
+            host = content
+        } else {
+            let effect = NSVisualEffectView()
+            effect.material = .hudWindow
+            effect.blendingMode = .withinWindow
+            effect.state = .active
+            effect.wantsLayer = true
+            effect.layer?.cornerRadius = radius
+            effect.layer?.cornerCurve = .continuous
+            effect.layer?.masksToBounds = true
+            effect.layer?.borderWidth = 1
+            effect.layer?.borderColor = NSColor.separatorColor.cgColor
+            backdrop = effect
+            host = self
+        }
+        backdrop.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(backdrop)
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(stack)
+
+        for (index, item) in items.enumerated() {
+            let btn = GlassTabButton(title: item.title, symbol: item.symbol)
+            btn.tag = index
+            btn.target = self
+            btn.action = #selector(tabClicked(_:))
+            buttons.append(btn)
+            stack.addArrangedSubview(btn)
+        }
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: height),
+            backdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backdrop.topAnchor.constraint(equalTo: topAnchor),
+            backdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: host.centerYAnchor)
+        ])
+
+        setSelected(index: 0)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setSelected(index: Int) {
+        for (i, btn) in buttons.enumerated() {
+            btn.isSelectedTab = (i == index)
+        }
+    }
+
+    @objc private func tabClicked(_ sender: NSButton) {
+        setSelected(index: sender.tag)
+        onSelect?(sender.tag)
+    }
+}
+
+// MARK: - Shortcut Recorder Button
+
 final class ShortcutRecordButton: NSButton {
     let actionType: HotKeyAction
     var isRecording: Bool = false {
@@ -18,10 +395,10 @@ final class ShortcutRecordButton: NSButton {
 
     init(action: HotKeyAction) {
         self.actionType = action
-        super.init(frame: NSRect(x: 0, y: 0, width: 190, height: 28))
-        self.bezelStyle = .rounded
+        super.init(frame: NSRect(x: 0, y: 0, width: 196, height: 28))
+        applyGlassButtonStyle(self, capsule: true)
         self.wantsLayer = true
-        self.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        self.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
         updateButtonTitle()
     }
 
@@ -29,10 +406,12 @@ final class ShortcutRecordButton: NSButton {
 
     func updateButtonTitle() {
         if isRecording {
-            title = "按下快捷键 (Esc 取消)..."
-            contentTintColor = .systemBlue
+            title = "按下快捷键 (Esc 取消)…"
+            bezelColor = .controlAccentColor
+            contentTintColor = .white
         } else {
             title = HotKeyManager.shared.displayString(for: actionType)
+            bezelColor = nil
             contentTintColor = nil
         }
     }
@@ -126,77 +505,115 @@ final class ShortcutRecordButton: NSButton {
     }
 }
 
+// MARK: - Preferences Window
+
 public final class PreferencesWindow: NSWindow {
     public var onPinAppearanceSettingsChanged: (() -> Void)?
 
-    private let tabView = NSTabView()
+    private static let windowWidth: CGFloat = 560
+    private static let headerHeight: CGFloat = 88
+
+    private var tabBar: GlassTabBar!
+    private let pageHost = NSView()
+    private var pages: [NSView] = []
+    private var selectedTabIndex: Int = 0
+
     private var recorderButtons: [HotKeyAction: ShortcutRecordButton] = [:]
+    private let shortcutStatusRow = NSStackView()
+    private let shortcutStatusIcon = NSImageView()
     private let shortcutStatusLabel = NSTextField(labelWithString: "")
 
     // General controls
-    private let launchAtLoginCheck = NSButton(checkboxWithTitle: "开机自动启动 PixSnap", target: nil, action: nil)
-    private let soundCheck = NSButton(checkboxWithTitle: "复制 / 保存完成时播放轻提示音", target: nil, action: nil)
-    private let autoCopyOnSaveCheck = NSButton(checkboxWithTitle: "快速保存时同时复制到剪贴板", target: nil, action: nil)
+    private let launchAtLoginSwitch = NSSwitch()
+    private let soundSwitch = NSSwitch()
+    private let autoCopyOnSaveSwitch = NSSwitch()
     private let saveDirLabel = NSTextField(labelWithString: "")
     private let formatPopup = NSPopUpButton()
 
     // Capture & Pin controls
-    private let magnifierCheck = NSButton(checkboxWithTitle: "截图悬停时显示 15×15 像素放大镜与取色器", target: nil, action: nil)
-    private let windowDetectCheck = NSButton(checkboxWithTitle: "自动探测前台应用窗口边界吸附", target: nil, action: nil)
+    private let magnifierSwitch = NSSwitch()
+    private let windowDetectSwitch = NSSwitch()
     private let colorFormatPopup = NSPopUpButton()
     private let pinAnchorPopup = NSPopUpButton()
-    private let pinBorderCheck = NSButton(checkboxWithTitle: "贴图显示细边框（浅色截图置顶时更易辨识）", target: nil, action: nil)
-    private let pinSpacesCheck = NSButton(checkboxWithTitle: "贴图跨桌面空间与全屏应用持续置顶", target: nil, action: nil)
+    private let pinBorderSwitch = NSSwitch()
+    private let pinSpacesSwitch = NSSwitch()
 
     // Corner customization controls (Selection, Rect Annotation, Pin Border)
     private let selectionCornerSeg = NSSegmentedControl(labels: ["直角", "圆角"], trackingMode: .selectOne, target: nil, action: nil)
     private let selectionRadiusSlider = NSSlider(value: 8, minValue: 2, maxValue: 24, target: nil, action: nil)
-    private let selectionRadiusLabel = NSTextField(labelWithString: "0 px")
+    private let selectionRadiusLabel = NSTextField(labelWithString: "直角")
 
     private let rectCornerSeg = NSSegmentedControl(labels: ["直角", "圆角"], trackingMode: .selectOne, target: nil, action: nil)
     private let rectRadiusSlider = NSSlider(value: 6, minValue: 2, maxValue: 20, target: nil, action: nil)
-    private let rectRadiusLabel = NSTextField(labelWithString: "0 px")
+    private let rectRadiusLabel = NSTextField(labelWithString: "直角")
 
     private let pinCornerSeg = NSSegmentedControl(labels: ["直角", "圆角"], trackingMode: .selectOne, target: nil, action: nil)
     private let pinRadiusSlider = NSSlider(value: 8, minValue: 2, maxValue: 24, target: nil, action: nil)
-    private let pinRadiusLabel = NSTextField(labelWithString: "0 px")
+    private let pinRadiusLabel = NSTextField(labelWithString: "直角")
 
     // Toolbar Liquid Glass opacity
     private let glassOpacitySlider = NSSlider(value: 60, minValue: 20, maxValue: 100, target: nil, action: nil)
     private let glassOpacityLabel = NSTextField(labelWithString: "60%")
 
     public init() {
-        let frame = NSRect(x: 0, y: 0, width: 540, height: 484)
+        let frame = NSRect(x: 0, y: 0, width: Self.windowWidth, height: 420)
         super.init(
             contentRect: frame,
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
         self.title = "PixSnap 偏好设置"
+        self.titlebarAppearsTransparent = true
+        self.isMovableByWindowBackground = true
+        self.isOpaque = false
+        self.backgroundColor = .clear
         self.isReleasedWhenClosed = false
         self.level = .floating
-        self.center()
 
         setupUI()
         refreshControlStates()
+        selectTab(index: 0, animated: false)
+        self.center()
+    }
+
+    public func selectTab(index: Int, animated: Bool = true) {
+        guard index >= 0 && index < pages.count else { return }
+        selectedTabIndex = index
+        tabBar.setSelected(index: index)
+
+        for (i, page) in pages.enumerated() {
+            page.isHidden = (i != index)
+        }
+
+        let activePage = pages[index]
+        activePage.layoutSubtreeIfNeeded()
+        let contentHeight = ceil(activePage.fittingSize.height)
+        let targetHeight = Self.headerHeight + contentHeight + 18
+
+        var newFrame = frame
+        let delta = targetHeight - newFrame.height
+        newFrame.origin.y -= delta
+        newFrame.size.height = targetHeight
+        newFrame.size.width = Self.windowWidth
+        setFrame(newFrame, display: true, animate: animated)
     }
 
     public func refreshControlStates() {
         let s = AppSettings.shared
-        launchAtLoginCheck.state = s.isLaunchAtLoginEnabled ? .on : .off
-        soundCheck.state = s.playCaptureSound ? .on : .off
-        autoCopyOnSaveCheck.state = s.autoCopyOnSave ? .on : .off
+        launchAtLoginSwitch.state = s.isLaunchAtLoginEnabled ? .on : .off
+        soundSwitch.state = s.playCaptureSound ? .on : .off
+        autoCopyOnSaveSwitch.state = s.autoCopyOnSave ? .on : .off
         saveDirLabel.stringValue = s.saveDirectoryURL.path
         formatPopup.selectItem(at: SaveImageFormat.allCases.firstIndex(of: s.saveFormat) ?? 0)
 
-        magnifierCheck.state = s.showMagnifier ? .on : .off
-        windowDetectCheck.state = s.enableWindowDetection ? .on : .off
+        magnifierSwitch.state = s.showMagnifier ? .on : .off
+        windowDetectSwitch.state = s.enableWindowDetection ? .on : .off
         colorFormatPopup.selectItem(at: ColorCopyFormat.allCases.firstIndex(of: s.colorCopyFormat) ?? 0)
         pinAnchorPopup.selectItem(at: PinZoomAnchorMode.allCases.firstIndex(of: s.pinZoomAnchorMode) ?? 0)
-        pinBorderCheck.state = s.pinShowBorder ? .on : .off
-        pinSpacesCheck.state = s.pinStayAcrossSpaces ? .on : .off
+        pinBorderSwitch.state = s.pinShowBorder ? .on : .off
+        pinSpacesSwitch.state = s.pinStayAcrossSpaces ? .on : .off
 
         selectionCornerSeg.selectedSegment = s.selectionUseRoundedCorners ? 1 : 0
         selectionRadiusSlider.doubleValue = Double(s.selectionCornerRadius)
@@ -213,8 +630,9 @@ public final class PreferencesWindow: NSWindow {
         pinRadiusSlider.isEnabled = s.pinUseRoundedCorners
         pinRadiusLabel.stringValue = s.pinUseRoundedCorners ? "\(Int(round(s.pinCornerRadius))) px" : "直角"
 
-        glassOpacitySlider.doubleValue = Double(round(s.toolbarGlassOpacity * 100))
-        glassOpacityLabel.stringValue = "\(Int(round(s.toolbarGlassOpacity * 100)))%"
+        let pct = Int(round(s.toolbarGlassOpacity * 100))
+        glassOpacitySlider.doubleValue = Double(pct)
+        glassOpacityLabel.stringValue = "\(pct)%"
 
         for btn in recorderButtons.values {
             btn.updateButtonTitle()
@@ -222,283 +640,360 @@ public final class PreferencesWindow: NSWindow {
     }
 
     private func setupUI() {
-        let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        let backdrop = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
+        backdrop.material = .underWindowBackground
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .active
 
-        tabView.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(tabView)
+        tabBar = GlassTabBar(items: [
+            ("通用与保存", "gearshape"),
+            ("全局快捷键", "command"),
+            ("截图与贴图", "camera.viewfinder")
+        ])
+        tabBar.onSelect = { [weak self] idx in
+            self?.selectTab(index: idx, animated: true)
+        }
+        backdrop.addSubview(tabBar)
+
+        pageHost.translatesAutoresizingMaskIntoConstraints = false
+        backdrop.addSubview(pageHost)
+
         NSLayoutConstraint.activate([
-            tabView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            tabView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            tabView.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            tabView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16)
+            tabBar.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
+            tabBar.topAnchor.constraint(equalTo: backdrop.topAnchor, constant: 38),
+
+            pageHost.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
+            pageHost.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
+            pageHost.topAnchor.constraint(equalTo: tabBar.bottomAnchor, constant: 12),
+            pageHost.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor)
         ])
 
-        let generalItem = NSTabViewItem(identifier: "general")
-        generalItem.label = "通用与保存"
-        generalItem.view = buildGeneralTab()
-        tabView.addTabViewItem(generalItem)
+        pages = [buildGeneralTab(), buildShortcutsTab(), buildCapturePinTab()]
+        for page in pages {
+            page.translatesAutoresizingMaskIntoConstraints = false
+            pageHost.addSubview(page)
+            NSLayoutConstraint.activate([
+                page.leadingAnchor.constraint(equalTo: pageHost.leadingAnchor),
+                page.trailingAnchor.constraint(equalTo: pageHost.trailingAnchor),
+                page.topAnchor.constraint(equalTo: pageHost.topAnchor)
+            ])
+        }
 
-        let shortcutItem = NSTabViewItem(identifier: "shortcuts")
-        shortcutItem.label = "全局快捷键"
-        shortcutItem.view = buildShortcutsTab()
-        tabView.addTabViewItem(shortcutItem)
-
-        let capturePinItem = NSTabViewItem(identifier: "capturePin")
-        capturePinItem.label = "截图与贴图"
-        capturePinItem.view = buildCapturePinTab()
-        tabView.addTabViewItem(capturePinItem)
-
-        self.contentView = container
+        self.contentView = backdrop
     }
 
     // MARK: - Tab 1: General
 
     private func buildGeneralTab() -> NSView {
-        let stack = makeTabStack()
+        let stack = makePageStack()
 
-        launchAtLoginCheck.target = self
-        launchAtLoginCheck.action = #selector(launchAtLoginToggled)
-        stack.addArrangedSubview(launchAtLoginCheck)
+        launchAtLoginSwitch.target = self
+        launchAtLoginSwitch.action = #selector(launchAtLoginToggled)
+        soundSwitch.target = self
+        soundSwitch.action = #selector(soundToggled)
+        autoCopyOnSaveSwitch.target = self
+        autoCopyOnSaveSwitch.action = #selector(autoCopyOnSaveToggled)
 
-        soundCheck.target = self
-        soundCheck.action = #selector(soundToggled)
-        stack.addArrangedSubview(soundCheck)
+        stack.addArrangedSubview(makeSectionHeader("常规"))
+        let generalCard = SettingsCardView(rows: [
+            makeSwitchRow(title: "开机自动启动 PixSnap", subtitle: nil, toggle: launchAtLoginSwitch),
+            makeSwitchRow(title: "完成提示音", subtitle: "复制或保存截图时播放轻提示音", toggle: soundSwitch),
+            makeSwitchRow(title: "快速保存时同时复制到剪贴板", subtitle: nil, toggle: autoCopyOnSaveSwitch)
+        ])
+        stack.addArrangedSubview(generalCard)
+        generalCard.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
 
-        autoCopyOnSaveCheck.target = self
-        autoCopyOnSaveCheck.action = #selector(autoCopyOnSaveToggled)
-        stack.addArrangedSubview(autoCopyOnSaveCheck)
-
-        stack.addArrangedSubview(makeDivider())
+        stack.addArrangedSubview(makeSectionHeader("保存设置"))
 
         // Save folder row
-        let dirHeader = NSTextField(labelWithString: "快速保存默认目录 (⌘S)：")
-        dirHeader.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        stack.addArrangedSubview(dirHeader)
-
-        let dirRow = NSStackView()
-        dirRow.orientation = .horizontal
-        dirRow.spacing = 8
-        dirRow.alignment = .centerY
-
-        saveDirLabel.font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        let dirRow = makeRowContainer()
+        let dirLeft = NSStackView()
+        dirLeft.orientation = .vertical
+        dirLeft.alignment = .leading
+        dirLeft.spacing = 3
+        let dirTitle = NSTextField(labelWithString: "快速保存目录 (⌘S)")
+        dirTitle.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        saveDirLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         saveDirLabel.textColor = .secondaryLabelColor
         saveDirLabel.lineBreakMode = .byTruncatingMiddle
         saveDirLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        dirRow.addArrangedSubview(saveDirLabel)
+        dirLeft.addArrangedSubview(dirTitle)
+        dirLeft.addArrangedSubview(saveDirLabel)
 
-        let chooseBtn = NSButton(title: "选择...", target: self, action: #selector(chooseSaveDirectory))
-        chooseBtn.bezelStyle = .rounded
+        let chooseBtn = makeGlassButton(title: "选择…", symbol: "folder", controlSize: .small, target: self, action: #selector(chooseSaveDirectory))
+        let revealBtn = makeGlassButton(title: "打开", symbol: "arrow.up.forward.square", controlSize: .small, target: self, action: #selector(revealSaveDirectory))
+
+        dirRow.addArrangedSubview(dirLeft)
+        dirRow.addArrangedSubview(makeSpacer())
         dirRow.addArrangedSubview(chooseBtn)
-
-        let revealBtn = NSButton(title: "打开", target: self, action: #selector(revealSaveDirectory))
-        revealBtn.bezelStyle = .rounded
         dirRow.addArrangedSubview(revealBtn)
 
-        stack.addArrangedSubview(dirRow)
-        dirRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
-
-        // Save format row
-        let fmtRow = NSStackView()
-        fmtRow.orientation = .horizontal
-        fmtRow.spacing = 10
-        fmtRow.alignment = .centerY
-
-        let fmtLabel = NSTextField(labelWithString: "默认保存格式：")
-        fmtLabel.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        fmtRow.addArrangedSubview(fmtLabel)
-
+        // Format row
         for fmt in SaveImageFormat.allCases {
             formatPopup.addItem(withTitle: fmt.displayName)
         }
+        applyGlassPopupStyle(formatPopup)
         formatPopup.target = self
         formatPopup.action = #selector(saveFormatChanged)
-        fmtRow.addArrangedSubview(formatPopup)
-        stack.addArrangedSubview(fmtRow)
+        let fmtRow = makeControlRow(title: "默认保存格式", control: formatPopup)
 
-        return wrapInContainer(stack)
+        let saveCard = SettingsCardView(rows: [dirRow, fmtRow])
+        stack.addArrangedSubview(saveCard)
+        saveCard.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+
+        return stack
     }
 
     // MARK: - Tab 2: Shortcuts
 
     private func buildShortcutsTab() -> NSView {
-        let stack = makeTabStack()
+        let stack = makePageStack()
 
-        let intro = NSTextField(labelWithString: "点击右侧录制框并按下组合键，设置后系统全局立即生效。")
-        intro.font = NSFont.systemFont(ofSize: 12)
+        let intro = NSTextField(labelWithString: "点击右侧胶囊按钮后按下组合键，设置立即全局生效。")
+        intro.font = NSFont.systemFont(ofSize: 11.5)
         intro.textColor = .secondaryLabelColor
         stack.addArrangedSubview(intro)
 
+        var shortcutRows: [NSView] = []
         for action in HotKeyAction.allCases {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.spacing = 10
-            row.alignment = .centerY
-
-            let titleLbl = NSTextField(labelWithString: "\(action.title)：")
-            titleLbl.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-            titleLbl.alignment = .right
-            titleLbl.widthAnchor.constraint(equalToConstant: 145).isActive = true
+            let row = makeRowContainer()
+            let titleLbl = NSTextField(labelWithString: action.title)
+            titleLbl.font = NSFont.systemFont(ofSize: 13, weight: .regular)
             row.addArrangedSubview(titleLbl)
+            row.addArrangedSubview(makeSpacer())
 
             let recBtn = ShortcutRecordButton(action: action)
-            recBtn.widthAnchor.constraint(equalToConstant: 195).isActive = true
+            recBtn.translatesAutoresizingMaskIntoConstraints = false
+            recBtn.widthAnchor.constraint(equalToConstant: 196).isActive = true
             recBtn.heightAnchor.constraint(equalToConstant: 28).isActive = true
             recBtn.onShortcutRecorded = { [weak self] act, kc, mods, disp in
                 self?.handleShortcutRecorded(action: act, keyCode: kc, modifiers: mods, display: disp)
             }
             recBtn.onInvalidShortcut = { [weak self] msg in
-                self?.showShortcutStatus("⚠️ \(msg)", isError: true)
+                self?.showShortcutStatus(msg, symbol: "exclamationmark.triangle.fill", color: .systemOrange)
             }
             recBtn.onShortcutCleared = { [weak self] act in
                 HotKeyManager.shared.clearHotKey(action: act)
                 self?.recorderButtons[act]?.updateButtonTitle()
-                self?.showShortcutStatus("已清除「\(act.title)」快捷键", isError: false)
+                self?.showShortcutStatus("已清除「\(act.title)」快捷键", symbol: "checkmark.circle.fill", color: .systemGreen)
             }
             recorderButtons[action] = recBtn
             row.addArrangedSubview(recBtn)
 
             if action != .capture {
-                let clearBtn = NSButton(title: "清除", target: self, action: #selector(clearShortcutClicked(_:)))
+                let clearBtn = makeGlassButton(title: "清除", controlSize: .small, target: self, action: #selector(clearShortcutClicked(_:)))
                 clearBtn.tag = Int(action.rawValue)
-                clearBtn.bezelStyle = .rounded
-                clearBtn.controlSize = .small
+                clearBtn.widthAnchor.constraint(equalToConstant: 52).isActive = true
                 row.addArrangedSubview(clearBtn)
+            } else {
+                let pad = NSView()
+                pad.translatesAutoresizingMaskIntoConstraints = false
+                pad.widthAnchor.constraint(equalToConstant: 52).isActive = true
+                row.addArrangedSubview(pad)
             }
 
-            stack.addArrangedSubview(row)
+            shortcutRows.append(row)
         }
 
+        let card = SettingsCardView(rows: shortcutRows)
+        stack.addArrangedSubview(card)
+        card.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+
+        shortcutStatusRow.orientation = .horizontal
+        shortcutStatusRow.alignment = .centerY
+        shortcutStatusRow.spacing = 6
+        shortcutStatusRow.isHidden = true
         shortcutStatusLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         shortcutStatusLabel.lineBreakMode = .byWordWrapping
-        shortcutStatusLabel.preferredMaxLayoutWidth = 440
-        stack.addArrangedSubview(shortcutStatusLabel)
+        shortcutStatusLabel.preferredMaxLayoutWidth = 480
+        shortcutStatusRow.addArrangedSubview(shortcutStatusIcon)
+        shortcutStatusRow.addArrangedSubview(shortcutStatusLabel)
+        stack.addArrangedSubview(shortcutStatusRow)
 
         let footerRow = NSStackView()
         footerRow.orientation = .horizontal
-        footerRow.spacing = 10
-        let resetBtn = NSButton(title: "恢复全部默认快捷键", target: self, action: #selector(resetAllShortcuts))
-        resetBtn.bezelStyle = .rounded
+        footerRow.alignment = .centerY
+        footerRow.spacing = 12
+        let resetBtn = makeGlassButton(title: "恢复全部默认快捷键", symbol: "arrow.counterclockwise", controlSize: .regular, target: self, action: #selector(resetAllShortcuts))
         footerRow.addArrangedSubview(resetBtn)
         stack.addArrangedSubview(footerRow)
 
-        let tip = NSTextField(wrappingLabelWithString: "• 为避免影响日常输入，普通字母/数字键必须搭配 ⌘ / ⌥ / ⌃ 之一；F1 ~ F12 可单键绑定。\n• 若快捷键已被系统或其他软件占用，将自动保留原设置并提示冲突。")
+        let tip = NSTextField(wrappingLabelWithString: "• 普通字母/数字键需搭配 ⌘ / ⌥ / ⌃ 之一，避免影响日常打字；F1 ~ F12 支持单键绑定。\n• 若快捷键已被系统或其他软件占用，将自动保留原设置并提示冲突。")
         tip.font = NSFont.systemFont(ofSize: 11)
         tip.textColor = .secondaryLabelColor
-        tip.preferredMaxLayoutWidth = 440
+        tip.preferredMaxLayoutWidth = Self.windowWidth - 40
         stack.addArrangedSubview(tip)
 
-        return wrapInContainer(stack)
+        return stack
     }
 
     // MARK: - Tab 3: Capture & Pin
 
     private func buildCapturePinTab() -> NSView {
-        let stack = makeTabStack()
+        let stack = makePageStack()
 
-        magnifierCheck.target = self
-        magnifierCheck.action = #selector(magnifierToggled)
-        stack.addArrangedSubview(magnifierCheck)
+        // Section 1: Capture & Glass
+        stack.addArrangedSubview(makeSectionHeader("截图与工具栏"))
 
-        windowDetectCheck.target = self
-        windowDetectCheck.action = #selector(windowDetectToggled)
-        stack.addArrangedSubview(windowDetectCheck)
+        magnifierSwitch.target = self
+        magnifierSwitch.action = #selector(magnifierToggled)
+        windowDetectSwitch.target = self
+        windowDetectSwitch.action = #selector(windowDetectToggled)
 
-        let colorRow = NSStackView()
-        colorRow.orientation = .horizontal
-        colorRow.spacing = 10
-        colorRow.alignment = .centerY
-        let colorLbl = NSTextField(labelWithString: "默认取色格式 (C 复制 / Tab 切换)：")
-        colorLbl.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        colorRow.addArrangedSubview(colorLbl)
         for fmt in ColorCopyFormat.allCases {
             colorFormatPopup.addItem(withTitle: fmt.displayName)
         }
+        applyGlassPopupStyle(colorFormatPopup)
         colorFormatPopup.target = self
         colorFormatPopup.action = #selector(colorFormatChanged)
-        colorRow.addArrangedSubview(colorFormatPopup)
-        stack.addArrangedSubview(colorRow)
 
-        stack.addArrangedSubview(makeDivider())
+        let captureCard = SettingsCardView(rows: [
+            makeSwitchRow(title: "悬停显示 15×15 像素放大镜与取色器", subtitle: nil, toggle: magnifierSwitch),
+            makeSwitchRow(title: "自动探测前台应用窗口边界吸附", subtitle: nil, toggle: windowDetectSwitch),
+            makeControlRow(title: "默认取色格式 (C 复制 / Tab 切换)", control: colorFormatPopup),
+            makeGlassOpacityRow()
+        ])
+        stack.addArrangedSubview(captureCard)
+        captureCard.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
 
-        // Corner customization rows (Selection, Rect Annotation, Pin Window)
-        stack.addArrangedSubview(makeCornerControlRow(
-            title: "框选边角 (按 R 切换)：",
-            segmented: selectionCornerSeg,
-            segAction: #selector(selectionCornerStyleChanged),
-            slider: selectionRadiusSlider,
-            sliderAction: #selector(selectionRadiusChanged),
-            valueLabel: selectionRadiusLabel
-        ))
+        // Section 2: Corners
+        stack.addArrangedSubview(makeSectionHeader("边角样式"))
+        let cornersCard = SettingsCardView(rows: [
+            makeCornerControlRow(
+                title: "框选边角 (R)",
+                segmented: selectionCornerSeg,
+                segAction: #selector(selectionCornerStyleChanged),
+                slider: selectionRadiusSlider,
+                sliderAction: #selector(selectionRadiusChanged),
+                valueLabel: selectionRadiusLabel
+            ),
+            makeCornerControlRow(
+                title: "矩形标注边角",
+                segmented: rectCornerSeg,
+                segAction: #selector(rectCornerStyleChanged),
+                slider: rectRadiusSlider,
+                sliderAction: #selector(rectRadiusChanged),
+                valueLabel: rectRadiusLabel
+            ),
+            makeCornerControlRow(
+                title: "贴图边框边角",
+                segmented: pinCornerSeg,
+                segAction: #selector(pinCornerStyleChanged),
+                slider: pinRadiusSlider,
+                sliderAction: #selector(pinRadiusChanged),
+                valueLabel: pinRadiusLabel
+            )
+        ])
+        stack.addArrangedSubview(cornersCard)
+        cornersCard.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
 
-        stack.addArrangedSubview(makeCornerControlRow(
-            title: "矩形标注边角：",
-            segmented: rectCornerSeg,
-            segAction: #selector(rectCornerStyleChanged),
-            slider: rectRadiusSlider,
-            sliderAction: #selector(rectRadiusChanged),
-            valueLabel: rectRadiusLabel
-        ))
+        // Section 3: Pin
+        stack.addArrangedSubview(makeSectionHeader("贴图行为"))
 
-        stack.addArrangedSubview(makeCornerControlRow(
-            title: "贴图边框边角：",
-            segmented: pinCornerSeg,
-            segAction: #selector(pinCornerStyleChanged),
-            slider: pinRadiusSlider,
-            sliderAction: #selector(pinRadiusChanged),
-            valueLabel: pinRadiusLabel
-        ))
-
-        stack.addArrangedSubview(makeGlassOpacityRow())
-
-        stack.addArrangedSubview(makeDivider())
-
-        let pinAnchorRow = NSStackView()
-        pinAnchorRow.orientation = .horizontal
-        pinAnchorRow.spacing = 10
-        pinAnchorRow.alignment = .centerY
-        let anchorLbl = NSTextField(labelWithString: "贴图滚轮缩放锚点：")
-        anchorLbl.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        pinAnchorRow.addArrangedSubview(anchorLbl)
         for mode in PinZoomAnchorMode.allCases {
             pinAnchorPopup.addItem(withTitle: mode.displayName)
         }
+        applyGlassPopupStyle(pinAnchorPopup)
         pinAnchorPopup.target = self
         pinAnchorPopup.action = #selector(pinAnchorChanged)
-        pinAnchorRow.addArrangedSubview(pinAnchorPopup)
-        stack.addArrangedSubview(pinAnchorRow)
 
-        pinBorderCheck.target = self
-        pinBorderCheck.action = #selector(pinBorderToggled)
-        stack.addArrangedSubview(pinBorderCheck)
+        pinBorderSwitch.target = self
+        pinBorderSwitch.action = #selector(pinBorderToggled)
+        pinSpacesSwitch.target = self
+        pinSpacesSwitch.action = #selector(pinSpacesToggled)
 
-        pinSpacesCheck.target = self
-        pinSpacesCheck.action = #selector(pinSpacesToggled)
-        stack.addArrangedSubview(pinSpacesCheck)
+        let pinCard = SettingsCardView(rows: [
+            makeControlRow(title: "贴图滚轮缩放锚点", control: pinAnchorPopup),
+            makeSwitchRow(title: "贴图显示细边框", subtitle: "浅色截图置顶时更易辨识边界", toggle: pinBorderSwitch),
+            makeSwitchRow(title: "跨桌面空间与全屏应用持续置顶", subtitle: nil, toggle: pinSpacesSwitch)
+        ])
+        stack.addArrangedSubview(pinCard)
+        pinCard.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
 
-        return wrapInContainer(stack)
+        return stack
     }
 
-    // MARK: - Helpers
+    // MARK: - Layout Builders
 
-    private func makeTabStack() -> NSStackView {
+    private func makePageStack() -> NSStackView {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 18, bottom: 10, right: 18)
         stack.translatesAutoresizingMaskIntoConstraints = false
         return stack
     }
 
-    private func wrapInContainer(_ stack: NSStackView) -> NSView {
-        let wrapper = NSView()
-        wrapper.addSubview(stack)
+    private func makeSectionHeader(_ title: String) -> NSView {
+        let wrap = NSView()
+        wrap.translatesAutoresizingMaskIntoConstraints = false
+        let lbl = NSTextField(labelWithString: title)
+        lbl.font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
+        lbl.textColor = .secondaryLabelColor
+        lbl.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(lbl)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: wrapper.topAnchor)
+            lbl.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 6),
+            lbl.trailingAnchor.constraint(equalTo: wrap.trailingAnchor),
+            lbl.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 4),
+            lbl.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -1)
         ])
-        return wrapper
+        return wrap
+    }
+
+    private func makeRowContainer(verticalInset: CGFloat = 10) -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.edgeInsets = NSEdgeInsets(top: verticalInset, left: 14, bottom: verticalInset, right: 14)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
+
+    private func makeSpacer() -> NSView {
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return spacer
+    }
+
+    private func makeSwitchRow(title: String, subtitle: String?, toggle: NSSwitch) -> NSView {
+        toggle.controlSize = .small
+        let row = makeRowContainer()
+        if let subtitle {
+            let left = NSStackView()
+            left.orientation = .vertical
+            left.alignment = .leading
+            left.spacing = 2
+            let t = NSTextField(labelWithString: title)
+            t.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+            let sub = NSTextField(labelWithString: subtitle)
+            sub.font = NSFont.systemFont(ofSize: 11)
+            sub.textColor = .secondaryLabelColor
+            left.addArrangedSubview(t)
+            left.addArrangedSubview(sub)
+            row.addArrangedSubview(left)
+        } else {
+            let t = NSTextField(labelWithString: title)
+            t.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+            row.addArrangedSubview(t)
+        }
+        row.addArrangedSubview(makeSpacer())
+        row.addArrangedSubview(toggle)
+        return row
+    }
+
+    private func makeControlRow(title: String, control: NSView) -> NSView {
+        let row = makeRowContainer()
+        let lbl = NSTextField(labelWithString: title)
+        lbl.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        row.addArrangedSubview(lbl)
+        row.addArrangedSubview(makeSpacer())
+        row.addArrangedSubview(control)
+        return row
     }
 
     private func makeCornerControlRow(
@@ -508,32 +1003,31 @@ public final class PreferencesWindow: NSWindow {
         slider: NSSlider,
         sliderAction: Selector,
         valueLabel: NSTextField
-    ) -> NSStackView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.spacing = 10
-        row.alignment = .centerY
+    ) -> NSView {
+        let row = makeRowContainer(verticalInset: 9)
 
         let lbl = NSTextField(labelWithString: title)
-        lbl.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        lbl.alignment = .right
-        lbl.widthAnchor.constraint(equalToConstant: 145).isActive = true
+        lbl.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        lbl.widthAnchor.constraint(equalToConstant: 112).isActive = true
         row.addArrangedSubview(lbl)
 
+        applyCapsuleSegmentStyle(segmented)
         segmented.target = self
         segmented.action = segAction
-        segmented.segmentStyle = .rounded
+        segmented.controlSize = .small
         segmented.widthAnchor.constraint(equalToConstant: 108).isActive = true
         row.addArrangedSubview(segmented)
 
         slider.target = self
         slider.action = sliderAction
         slider.isContinuous = true
-        slider.widthAnchor.constraint(equalToConstant: 135).isActive = true
+        slider.controlSize = .small
+        slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
         row.addArrangedSubview(slider)
 
         valueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
         valueLabel.textColor = .secondaryLabelColor
+        valueLabel.alignment = .right
         valueLabel.widthAnchor.constraint(equalToConstant: 42).isActive = true
         row.addArrangedSubview(valueLabel)
 
@@ -541,20 +1035,22 @@ public final class PreferencesWindow: NSWindow {
     }
 
     private func makeGlassOpacityRow() -> NSView {
-        let column = NSStackView()
-        column.orientation = .vertical
-        column.alignment = .leading
-        column.spacing = 4
+        let col = NSStackView()
+        col.orientation = .vertical
+        col.alignment = .leading
+        col.spacing = 4
+        col.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        col.translatesAutoresizingMaskIntoConstraints = false
 
         let row = NSStackView()
         row.orientation = .horizontal
-        row.spacing = 10
+        row.spacing = 8
         row.alignment = .centerY
+        row.translatesAutoresizingMaskIntoConstraints = false
 
-        let lbl = NSTextField(labelWithString: "工具栏玻璃：")
-        lbl.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        lbl.alignment = .right
-        lbl.widthAnchor.constraint(equalToConstant: 145).isActive = true
+        let lbl = NSTextField(labelWithString: "工具栏玻璃")
+        lbl.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        lbl.widthAnchor.constraint(equalToConstant: 96).isActive = true
         row.addArrangedSubview(lbl)
 
         let moreClear = NSTextField(labelWithString: "透")
@@ -565,7 +1061,8 @@ public final class PreferencesWindow: NSWindow {
         glassOpacitySlider.target = self
         glassOpacitySlider.action = #selector(glassOpacityChanged)
         glassOpacitySlider.isContinuous = true
-        glassOpacitySlider.widthAnchor.constraint(equalToConstant: 162).isActive = true
+        glassOpacitySlider.controlSize = .small
+        glassOpacitySlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
         row.addArrangedSubview(glassOpacitySlider)
 
         let moreSolid = NSTextField(labelWithString: "实")
@@ -575,43 +1072,34 @@ public final class PreferencesWindow: NSWindow {
 
         glassOpacityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
         glassOpacityLabel.textColor = .secondaryLabelColor
-        glassOpacityLabel.widthAnchor.constraint(equalToConstant: 42).isActive = true
+        glassOpacityLabel.alignment = .right
+        glassOpacityLabel.widthAnchor.constraint(equalToConstant: 38).isActive = true
         row.addArrangedSubview(glassOpacityLabel)
 
-        let resetBtn = NSButton(title: "默认", target: self, action: #selector(resetGlassOpacity))
-        resetBtn.bezelStyle = .rounded
-        resetBtn.controlSize = .small
+        let resetBtn = makeGlassButton(title: "默认", controlSize: .small, target: self, action: #selector(resetGlassOpacity))
         row.addArrangedSubview(resetBtn)
-        column.addArrangedSubview(row)
+
+        col.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: col.widthAnchor, constant: -28).isActive = true
 
         let hint = NSTextField(labelWithString: PixTheme.supportsLiquidGlass
             ? "拖动实时生效；越往左越透明，100% 为系统原生液态玻璃。"
             : "需要 macOS 26 及以上（液态玻璃）才会生效。")
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
-        hint.translatesAutoresizingMaskIntoConstraints = false
-        column.addArrangedSubview(hint)
-        hint.leadingAnchor.constraint(equalTo: glassOpacitySlider.leadingAnchor).isActive = true
+        col.addArrangedSubview(hint)
 
         glassOpacitySlider.isEnabled = PixTheme.supportsLiquidGlass
-        return column
-    }
-
-    private func makeDivider() -> NSView {
-        let line = NSBox()
-        line.boxType = .separator
-        line.translatesAutoresizingMaskIntoConstraints = false
-        line.widthAnchor.constraint(equalToConstant: 468).isActive = true
-        return line
+        return col
     }
 
     // MARK: - Actions
 
     @objc private func launchAtLoginToggled() {
-        let desired = (launchAtLoginCheck.state == .on)
+        let desired = (launchAtLoginSwitch.state == .on)
         let ok = AppSettings.shared.setLaunchAtLogin(desired)
         if !ok {
-            launchAtLoginCheck.state = AppSettings.shared.isLaunchAtLoginEnabled ? .on : .off
+            launchAtLoginSwitch.state = AppSettings.shared.isLaunchAtLoginEnabled ? .on : .off
             ToastHUD.shared.show(
                 "请在「系统设置 -> 通用 -> 登录项」中允许 PixSnap",
                 symbolName: "gearshape.fill",
@@ -622,11 +1110,11 @@ public final class PreferencesWindow: NSWindow {
     }
 
     @objc private func soundToggled() {
-        AppSettings.shared.playCaptureSound = (soundCheck.state == .on)
+        AppSettings.shared.playCaptureSound = (soundSwitch.state == .on)
     }
 
     @objc private func autoCopyOnSaveToggled() {
-        AppSettings.shared.autoCopyOnSave = (autoCopyOnSaveCheck.state == .on)
+        AppSettings.shared.autoCopyOnSave = (autoCopyOnSaveSwitch.state == .on)
     }
 
     @objc private func chooseSaveDirectory() {
@@ -662,9 +1150,9 @@ public final class PreferencesWindow: NSWindow {
         )
         recorderButtons[action]?.updateButtonTitle()
         if success {
-            showShortcutStatus("✅ 「\(action.title)」已生效：\(display)", isError: false)
+            showShortcutStatus("「\(action.title)」已生效：\(display)", symbol: "checkmark.circle.fill", color: .systemGreen)
         } else {
-            showShortcutStatus("❌ 注册失败：\(display) 可能与系统或其他快捷键冲突，已保留原设置", isError: true)
+            showShortcutStatus("注册失败：\(display) 可能与系统或其他快捷键冲突，已保留原设置", symbol: "xmark.circle.fill", color: .systemRed)
         }
     }
 
@@ -672,7 +1160,7 @@ public final class PreferencesWindow: NSWindow {
         guard let action = HotKeyAction(rawValue: UInt32(sender.tag)) else { return }
         HotKeyManager.shared.clearHotKey(action: action)
         recorderButtons[action]?.updateButtonTitle()
-        showShortcutStatus("已清除「\(action.title)」快捷键", isError: false)
+        showShortcutStatus("已清除「\(action.title)」快捷键", symbol: "checkmark.circle.fill", color: .systemGreen)
     }
 
     @objc private func resetAllShortcuts() {
@@ -680,25 +1168,28 @@ public final class PreferencesWindow: NSWindow {
         for btn in recorderButtons.values {
             btn.updateButtonTitle()
         }
-        showShortcutStatus("✅ 已恢复全部默认快捷键", isError: false)
+        showShortcutStatus("已恢复全部默认快捷键", symbol: "checkmark.circle.fill", color: .systemGreen)
     }
 
-    private func showShortcutStatus(_ msg: String, isError: Bool) {
-        shortcutStatusLabel.textColor = isError ? .systemRed : .systemGreen
-        shortcutStatusLabel.stringValue = msg
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
-            if self?.shortcutStatusLabel.stringValue == msg {
-                self?.shortcutStatusLabel.stringValue = ""
-            }
+    private func showShortcutStatus(_ text: String, symbol: String, color: NSColor) {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+            img.isTemplate = true
+            shortcutStatusIcon.image = img
+            shortcutStatusIcon.contentTintColor = color
         }
+        shortcutStatusLabel.stringValue = text
+        shortcutStatusLabel.textColor = color
+        shortcutStatusRow.isHidden = false
+        selectTab(index: selectedTabIndex, animated: false)
     }
 
     @objc private func magnifierToggled() {
-        AppSettings.shared.showMagnifier = (magnifierCheck.state == .on)
+        AppSettings.shared.showMagnifier = (magnifierSwitch.state == .on)
     }
 
     @objc private func windowDetectToggled() {
-        AppSettings.shared.enableWindowDetection = (windowDetectCheck.state == .on)
+        AppSettings.shared.enableWindowDetection = (windowDetectSwitch.state == .on)
     }
 
     @objc private func colorFormatChanged() {
@@ -716,12 +1207,12 @@ public final class PreferencesWindow: NSWindow {
     }
 
     @objc private func pinBorderToggled() {
-        AppSettings.shared.pinShowBorder = (pinBorderCheck.state == .on)
+        AppSettings.shared.pinShowBorder = (pinBorderSwitch.state == .on)
         onPinAppearanceSettingsChanged?()
     }
 
     @objc private func pinSpacesToggled() {
-        AppSettings.shared.pinStayAcrossSpaces = (pinSpacesCheck.state == .on)
+        AppSettings.shared.pinStayAcrossSpaces = (pinSpacesSwitch.state == .on)
         onPinAppearanceSettingsChanged?()
     }
 
