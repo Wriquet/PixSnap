@@ -108,4 +108,76 @@ struct OverlaySelectionResizeTests {
         #expect(view.annotations.count == 1)
         #expect(view.toolbar.activeTool == .counter)
     }
+
+    @Test func redRectAnnotationAutoSelectsAndExpandsWithoutCreatingDuplicateBox() throws {
+        let (win, view) = try makeOverlay()
+        defer { win.closeOverlay() }
+
+        // Create crop selection (200, 150, 600, 450) -> x: 200..800, y: 150..600
+        try drag(view, from: CGPoint(x: 200, y: 600), to: CGPoint(x: 800, y: 150))
+        #expect(view.state == .selected)
+
+        // Activate Rect tool and draw a red box (350, 300, 150, 120) -> x: 350..500, y: 300..420
+        view.toolbar.setActiveTool(.rect)
+        try drag(view, from: CGPoint(x: 350, y: 420), to: CGPoint(x: 500, y: 300))
+        #expect(view.annotations.count == 1)
+        #expect(view.selectedAnnotationID == view.annotations[0].id)
+        #expect(view.annotations[0].normalizedRect == CGRect(x: 350, y: 300, width: 150, height: 120))
+
+        // Immediately grab the RIGHT midpoint handle (500, 360) and drag right -> must EXPAND, NOT create a 2nd box!
+        try drag(view, from: CGPoint(x: 500, y: 360), to: CGPoint(x: 620, y: 360))
+        #expect(view.annotations.count == 1)
+        #expect(view.annotations[0].normalizedRect == CGRect(x: 350, y: 300, width: 270, height: 120))
+
+        // Grab TOP-LEFT corner handle (350, 420) and expand up-left to (320, 460)
+        try drag(view, from: CGPoint(x: 350, y: 420), to: CGPoint(x: 320, y: 460))
+        #expect(view.annotations.count == 1)
+        #expect(view.annotations[0].normalizedRect == CGRect(x: 320, y: 300, width: 300, height: 160))
+
+        // Drag the top border away from handles (390, 460) -> moves the red box instead of creating a new one
+        try drag(view, from: CGPoint(x: 390, y: 460), to: CGPoint(x: 410, y: 440))
+        #expect(view.annotations.count == 1)
+        #expect(view.annotations[0].normalizedRect == CGRect(x: 340, y: 280, width: 300, height: 160))
+
+        // Dragging inside empty hollow interior starts a brand new second red box
+        try drag(view, from: CGPoint(x: 420, y: 380), to: CGPoint(x: 520, y: 320))
+        #expect(view.annotations.count == 2)
+        #expect(view.selectedAnnotationID == view.annotations[1].id)
+        #expect(view.annotations[1].normalizedRect == CGRect(x: 420, y: 320, width: 100, height: 60))
+
+        // Undo removes 2nd box, then reverts move, then reverts corner resize
+        let cmdZ = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "z", charactersIgnoringModifiers: "z",
+            isARepeat: false, keyCode: 6
+        ))
+        #expect(view.performKeyEquivalent(with: cmdZ) == true)
+        #expect(view.annotations.count == 1)
+        #expect(view.performKeyEquivalent(with: cmdZ) == true)
+        #expect(view.annotations[0].normalizedRect == CGRect(x: 320, y: 300, width: 300, height: 160))
+    }
+
+    @Test func ellipseAndArrowAnnotationsResizeViaHandlesWhileToolActive() throws {
+        let (win, view) = try makeOverlay()
+        defer { win.closeOverlay() }
+
+        try drag(view, from: CGPoint(x: 150, y: 600), to: CGPoint(x: 850, y: 120))
+
+        // Ellipse: draw then expand bottom-right corner
+        view.toolbar.setActiveTool(.ellipse)
+        try drag(view, from: CGPoint(x: 250, y: 450), to: CGPoint(x: 350, y: 350))
+        #expect(view.annotations.count == 1)
+        try drag(view, from: CGPoint(x: 350, y: 350), to: CGPoint(x: 430, y: 290))
+        #expect(view.annotations.count == 1)
+        #expect(view.annotations[0].normalizedRect == CGRect(x: 250, y: 290, width: 180, height: 160))
+
+        // Arrow: draw then drag arrowhead endpoint to lengthen
+        view.toolbar.setActiveTool(.arrow)
+        try drag(view, from: CGPoint(x: 500, y: 300), to: CGPoint(x: 620, y: 360))
+        #expect(view.annotations.count == 2)
+        try drag(view, from: CGPoint(x: 620, y: 360), to: CGPoint(x: 740, y: 420))
+        #expect(view.annotations.count == 2)
+        #expect(view.annotations[1].startPoint == CGPoint(x: 500, y: 300))
+        #expect(view.annotations[1].endPoint == CGPoint(x: 740, y: 420))
+    }
 }

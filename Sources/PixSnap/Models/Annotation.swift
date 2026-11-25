@@ -78,6 +78,11 @@ public enum StrokeSizePreset: Int, CaseIterable, Sendable {
     }
 }
 
+public enum AnnotationResizeHandle: Hashable, Sendable {
+    case topLeft, top, topRight, right, bottomRight, bottom, bottomLeft, left
+    case arrowStart, arrowEnd
+}
+
 public struct Annotation: Equatable {
     public let id: UUID
     public var type: ToolType
@@ -226,6 +231,148 @@ public struct Annotation: Equatable {
             copy.points = points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
         }
         return copy
+    }
+
+    /// Whether this annotation supports direct handle resizing (rect, ellipse, arrow).
+    public var supportsResizeHandles: Bool {
+        type == .rect || type == .ellipse || type == .arrow
+    }
+
+    /// Deterministic ordered resize handle points (corners before edge midpoints for shapes).
+    public func resizeHandles() -> [(AnnotationResizeHandle, CGPoint)] {
+        switch type {
+        case .rect, .ellipse:
+            let r = normalizedRect
+            return [
+                (.topLeft, CGPoint(x: r.minX, y: r.maxY)),
+                (.topRight, CGPoint(x: r.maxX, y: r.maxY)),
+                (.bottomLeft, CGPoint(x: r.minX, y: r.minY)),
+                (.bottomRight, CGPoint(x: r.maxX, y: r.minY)),
+                (.top, CGPoint(x: r.midX, y: r.maxY)),
+                (.bottom, CGPoint(x: r.midX, y: r.minY)),
+                (.left, CGPoint(x: r.minX, y: r.midY)),
+                (.right, CGPoint(x: r.maxX, y: r.midY))
+            ]
+        case .arrow:
+            return [
+                (.arrowEnd, endPoint),
+                (.arrowStart, startPoint)
+            ]
+        default:
+            return []
+        }
+    }
+
+    /// Hit-test resize handles on this annotation (corners prioritized over edge midpoints).
+    public func hitTestResizeHandle(at point: CGPoint, radius: CGFloat = 11.0) -> AnnotationResizeHandle? {
+        for (handle, center) in resizeHandles() {
+            if hypot(point.x - center.x, point.y - center.y) <= radius {
+                return handle
+            }
+        }
+        return nil
+    }
+
+    /// Return a resized copy of this annotation when dragging `handle` to `targetPoint`.
+    public func resized(
+        handle: AnnotationResizeHandle,
+        to rawTarget: CGPoint,
+        shiftConstrained: Bool = false,
+        clampedTo bounds: CGRect
+    ) -> Annotation {
+        let pt = CGPoint(
+            x: max(bounds.minX, min(bounds.maxX, rawTarget.x)),
+            y: max(bounds.minY, min(bounds.maxY, rawTarget.y))
+        )
+        var copy = self
+
+        switch type {
+        case .rect, .ellipse:
+            let orig = normalizedRect
+            var minX = orig.minX
+            var maxX = orig.maxX
+            var minY = orig.minY
+            var maxY = orig.maxY
+
+            switch handle {
+            case .topLeft:
+                if shiftConstrained {
+                    let constrained = Self.constrainEndPoint(from: CGPoint(x: orig.maxX, y: orig.minY), to: pt, for: type)
+                    minX = max(bounds.minX, min(bounds.maxX, constrained.x))
+                    maxY = max(bounds.minY, min(bounds.maxY, constrained.y))
+                } else {
+                    minX = pt.x
+                    maxY = pt.y
+                }
+            case .topRight:
+                if shiftConstrained {
+                    let constrained = Self.constrainEndPoint(from: CGPoint(x: orig.minX, y: orig.minY), to: pt, for: type)
+                    maxX = max(bounds.minX, min(bounds.maxX, constrained.x))
+                    maxY = max(bounds.minY, min(bounds.maxY, constrained.y))
+                } else {
+                    maxX = pt.x
+                    maxY = pt.y
+                }
+            case .bottomLeft:
+                if shiftConstrained {
+                    let constrained = Self.constrainEndPoint(from: CGPoint(x: orig.maxX, y: orig.maxY), to: pt, for: type)
+                    minX = max(bounds.minX, min(bounds.maxX, constrained.x))
+                    minY = max(bounds.minY, min(bounds.maxY, constrained.y))
+                } else {
+                    minX = pt.x
+                    minY = pt.y
+                }
+            case .bottomRight:
+                if shiftConstrained {
+                    let constrained = Self.constrainEndPoint(from: CGPoint(x: orig.minX, y: orig.maxY), to: pt, for: type)
+                    maxX = max(bounds.minX, min(bounds.maxX, constrained.x))
+                    minY = max(bounds.minY, min(bounds.maxY, constrained.y))
+                } else {
+                    maxX = pt.x
+                    minY = pt.y
+                }
+            case .top:
+                maxY = pt.y
+            case .bottom:
+                minY = pt.y
+            case .left:
+                minX = pt.x
+            case .right:
+                maxX = pt.x
+            default:
+                return copy
+            }
+
+            let loX = min(minX, maxX)
+            let hiX = max(minX, maxX)
+            let loY = min(minY, maxY)
+            let hiY = max(minY, maxY)
+            copy.startPoint = CGPoint(x: loX, y: loY)
+            copy.endPoint = CGPoint(x: max(loX + 4, hiX), y: max(loY + 4, hiY))
+            return copy
+
+        case .arrow:
+            switch handle {
+            case .arrowStart:
+                let next = shiftConstrained ? Self.constrainEndPoint(from: endPoint, to: pt, for: .arrow) : pt
+                copy.startPoint = CGPoint(
+                    x: max(bounds.minX, min(bounds.maxX, next.x)),
+                    y: max(bounds.minY, min(bounds.maxY, next.y))
+                )
+            case .arrowEnd:
+                let next = shiftConstrained ? Self.constrainEndPoint(from: startPoint, to: pt, for: .arrow) : pt
+                copy.endPoint = CGPoint(
+                    x: max(bounds.minX, min(bounds.maxX, next.x)),
+                    y: max(bounds.minY, min(bounds.maxY, next.y))
+                )
+            default:
+                break
+            }
+            return copy
+
+        default:
+            return copy
+        }
     }
 
     public static func distanceFromPoint(_ p: CGPoint, toSegmentStart a: CGPoint, end b: CGPoint) -> CGFloat {

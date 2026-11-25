@@ -143,6 +143,7 @@ public final class OverlayView: NSView {
     private enum HandleType: Hashable {
         case move
         case moveAnnotation(UUID)
+        case resizeAnnotation(UUID, AnnotationResizeHandle)
         case topLeft, top, topRight, right, bottomRight, bottom, bottomLeft, left
     }
 
@@ -151,7 +152,7 @@ public final class OverlayView: NSView {
     private var undoStack: [[Annotation]] = []
     private var redoStack: [[Annotation]] = []
     private var currentAnnotation: Annotation?
-    private var selectedAnnotationID: UUID?
+    internal private(set) var selectedAnnotationID: UUID?
     private var dragOriginalAnnotation: Annotation?
     private var didMoveAnnotationDuringDrag: Bool = false
     private var nextCounterNumber: Int = 1
@@ -780,13 +781,16 @@ public final class OverlayView: NSView {
                 NSCursor.arrow.set()
                 return
             }
-            let resizeHandle = hitTestResizeHandle(at: loc)
+            let resizeHandle = hitTestActiveResizeHandle(at: loc)
             if resizeHandle != hoveredResizeHandle {
                 hoveredResizeHandle = resizeHandle
                 needsDisplay = true
             }
             if let resizeHandle {
                 updateCursor(for: resizeHandle)
+            } else if canInteractWithExistingAnnotation(for: toolbar.activeTool),
+                      annotations.reversed().contains(where: { $0.hitTest(point: loc) }) {
+                NSCursor.openHand.set()
             } else if toolbar.activeTool == .none {
                 let handle = hitTestHandles(at: loc)
                 updateCursor(for: handle)
@@ -859,29 +863,65 @@ public final class OverlayView: NSView {
                 }
             }
 
-            // Always allow dragging the 8 corner/midpoint handles & 4 borders to expand or adjust selection,
-            // even while an annotation tool (rect/arrow/pen/text/counter/mosaic) is active!
-            if let resizeHandle = hitTestResizeHandle(at: loc) {
-                selectedAnnotationID = nil
-                updateSubBarVisibility()
-                activeHandle = resizeHandle
-                hoveredResizeHandle = resizeHandle
-                initialSelectionRect = selectionRect
-                updateCursor(for: resizeHandle)
+            // 1. Always allow dragging selected annotation's resize handles OR the outer crop box's
+            // 8 handles & 4 borders, even while an annotation tool (rect/ellipse/arrow/text/etc.) is active!
+            if let resizeHandle = hitTestActiveResizeHandle(at: loc) {
+                switch resizeHandle {
+                case .resizeAnnotation(let id, _):
+                    selectedAnnotationID = id
+                    activeHandle = resizeHandle
+                    hoveredResizeHandle = resizeHandle
+                    dragOriginalAnnotation = annotations.first { $0.id == id }
+                    didMoveAnnotationDuringDrag = false
+                    updateCursor(for: resizeHandle)
+                    needsDisplay = true
+                    return
+                default:
+                    selectedAnnotationID = nil
+                    updateSubBarVisibility()
+                    activeHandle = resizeHandle
+                    hoveredResizeHandle = resizeHandle
+                    initialSelectionRect = selectionRect
+                    updateCursor(for: resizeHandle)
+                    needsDisplay = true
+                    return
+                }
+            }
+
+            // 2. Clicking on an existing annotation's border/body selects & moves it seamlessly
+            // (even while rect/ellipse/arrow tool is still active, instead of stacking duplicate boxes!)
+            if canInteractWithExistingAnnotation(for: toolbar.activeTool),
+               let hitAnnot = annotations.reversed().first(where: { $0.hitTest(point: loc) }) {
+                selectedAnnotationID = hitAnnot.id
+                activeHandle = .moveAnnotation(hitAnnot.id)
+                dragOriginalAnnotation = hitAnnot
+                didMoveAnnotationDuringDrag = false
+                if toolbar.activeTool == .none {
+                    toolbar.subBar.configure(for: hitAnnot.type, nextCounter: nextCounterNumber)
+                    toolbar.subBar.syncFromAnnotation(hitAnnot)
+                    updateSubBarVisibility()
+                    positionToolbars()
+                } else if toolbar.activeTool == hitAnnot.type {
+                    toolbar.subBar.syncFromAnnotation(hitAnnot)
+                }
+                NSCursor.closedHand.set()
                 needsDisplay = true
                 return
             }
 
             // Text tool
             if toolbar.activeTool == .text {
+                selectedAnnotationID = nil
                 if selectionRect.contains(loc) {
                     startInlineTextEditor(at: loc)
                 }
+                needsDisplay = true
                 return
             }
 
             // Counter tool: instant click badge placement
             if toolbar.activeTool == .counter {
+                selectedAnnotationID = nil
                 if selectionRect.contains(loc) {
                     recordUndoSnapshot()
                     let badge = Annotation(
@@ -902,8 +942,9 @@ public final class OverlayView: NSView {
                 return
             }
 
-            // Other drawing tools
+            // Other drawing tools (dragging on empty space / hollow interior draws a new annotation)
             if toolbar.activeTool != .none {
+                selectedAnnotationID = nil
                 if selectionRect.contains(loc) {
                     if toolbar.activeTool == .mosaic {
                         ensureEffectImagesReady()
@@ -929,6 +970,8 @@ public final class OverlayView: NSView {
                         cornerRadius: rectRadius,
                         mosaicStyle: toolbar.activeMosaicStyle
                     )
+                    needsDisplay = true
+                } else {
                     needsDisplay = true
                 }
                 return
@@ -1002,9 +1045,24 @@ public final class OverlayView: NSView {
                 let dx = loc.x - dragStartPoint.x
                 let dy = loc.y - dragStartPoint.y
 
-                if case .moveAnnotation(let id) = handle,
+                if case .resizeAnnotation(let id, let annotHandle) = handle,
                    let original = dragOriginalAnnotation,
                    let idx = annotations.firstIndex(where: { $0.id == id }) {
+                    if !didMoveAnnotationDuringDrag && hypot(dx, dy) > 1.5 {
+                        recordUndoSnapshot()
+                        didMoveAnnotationDuringDrag = true
+                    }
+                    annotations[idx] = original.resized(
+                        handle: annotHandle,
+                        to: loc,
+                        shiftConstrained: event.modifierFlags.contains(.shift),
+                        clampedTo: selectionRect
+                    )
+                    updateCursor(for: handle)
+                    needsDisplay = true
+                } else if case .moveAnnotation(let id) = handle,
+                          let original = dragOriginalAnnotation,
+                          let idx = annotations.firstIndex(where: { $0.id == id }) {
                     if !didMoveAnnotationDuringDrag && hypot(dx, dy) > 1.5 {
                         recordUndoSnapshot()
                         didMoveAnnotationDuringDrag = true
@@ -1087,6 +1145,9 @@ public final class OverlayView: NSView {
                 if isMeaningful {
                     recordUndoSnapshot()
                     annotations.append(annot)
+                    if annot.supportsResizeHandles {
+                        selectedAnnotationID = annot.id
+                    }
                     invalidateAndReschedulePreAnalysis()
                 }
                 currentAnnotation = nil
@@ -1094,21 +1155,25 @@ public final class OverlayView: NSView {
             }
 
             if let handle = activeHandle {
-                if case .moveAnnotation = handle {
+                switch handle {
+                case .moveAnnotation, .resizeAnnotation:
                     if didMoveAnnotationDuringDrag {
                         invalidateAndReschedulePreAnalysis()
                     }
-                } else {
+                default:
                     positionToolbars(updateGlassAppearance: true)
                     invalidateAndReschedulePreAnalysis()
                 }
                 activeHandle = nil
                 dragOriginalAnnotation = nil
                 didMoveAnnotationDuringDrag = false
-                let postResizeHover = hitTestResizeHandle(at: loc)
+                let postResizeHover = hitTestActiveResizeHandle(at: loc)
                 hoveredResizeHandle = postResizeHover
                 if let postResizeHover {
                     updateCursor(for: postResizeHover)
+                } else if canInteractWithExistingAnnotation(for: toolbar.activeTool),
+                          annotations.reversed().contains(where: { $0.hitTest(point: loc) }) {
+                    NSCursor.openHand.set()
                 } else if toolbar.activeTool == .none {
                     updateCursor(for: hitTestHandles(at: loc))
                 } else if toolbar.activeTool == .text {
@@ -1617,19 +1682,27 @@ public final class OverlayView: NSView {
                 )
             }
 
-            // Highlight selected existing annotation with dashed frame
-            if let selID = selectedAnnotationID,
-               let selAnnot = annotations.first(where: { $0.id == selID }) {
-                let box = selAnnot.boundingBox
-                ctx.saveGState()
-                ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.95).cgColor)
-                ctx.setLineWidth(1.4)
-                ctx.setLineDash(phase: 0, lengths: [4, 3])
-                ctx.stroke(box)
-                ctx.setStrokeColor(PixTheme.accent.cgColor)
-                ctx.setLineDash(phase: 4, lengths: [4, 3])
-                ctx.stroke(box)
-                ctx.restoreGState()
+            // Highlight selected existing annotation (subtle bounding guide for non-rect shapes / non-resizable annotations)
+            if let selAnnot = selectedAnnotation {
+                if !selAnnot.supportsResizeHandles {
+                    let box = selAnnot.boundingBox
+                    ctx.saveGState()
+                    ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.95).cgColor)
+                    ctx.setLineWidth(1.4)
+                    ctx.setLineDash(phase: 0, lengths: [4, 3])
+                    ctx.stroke(box)
+                    ctx.setStrokeColor(PixTheme.accent.cgColor)
+                    ctx.setLineDash(phase: 4, lengths: [4, 3])
+                    ctx.stroke(box)
+                    ctx.restoreGState()
+                } else if selAnnot.type == .ellipse {
+                    ctx.saveGState()
+                    ctx.setStrokeColor(PixTheme.accent.withAlphaComponent(0.7).cgColor)
+                    ctx.setLineWidth(1.0)
+                    ctx.setLineDash(phase: 0, lengths: [4, 3])
+                    ctx.stroke(selAnnot.normalizedRect)
+                    ctx.restoreGState()
+                }
             }
 
             ctx.restoreGState()
@@ -1650,9 +1723,10 @@ public final class OverlayView: NSView {
             let tagY = (aboveY + 24 <= bounds.maxY - 4) ? aboveY : max(bounds.minY + 6, selectionRect.maxY - 26)
             drawClampedPillTag(sizeTag, preferredOrigin: CGPoint(x: selectionRect.minX, y: tagY))
 
-            // 8 circular resize handles
+            // 8 circular resize handles on selection box + resize handles on selected annotation
             if state == .selected {
                 drawHandles(in: ctx)
+                drawSelectedAnnotationHandles(in: ctx)
             }
         }
     }
@@ -1678,6 +1752,59 @@ public final class OverlayView: NSView {
         path.stroke()
 
         (text as NSString).draw(at: CGPoint(x: pillRect.minX + 10, y: pillRect.minY + 4), withAttributes: attr)
+    }
+
+    private var selectedAnnotation: Annotation? {
+        guard let id = selectedAnnotationID else { return nil }
+        return annotations.first { $0.id == id }
+    }
+
+    private func canInteractWithExistingAnnotation(for tool: ToolType) -> Bool {
+        switch tool {
+        case .none, .rect, .ellipse, .arrow:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func drawSelectedAnnotationHandles(in ctx: CGContext) {
+        guard let annot = selectedAnnotation, annot.supportsResizeHandles else { return }
+        let handles = annot.resizeHandles()
+        guard !handles.isEmpty else { return }
+        let activeHighlight = activeHandle ?? hoveredResizeHandle
+
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -0.5), blur: 2, color: NSColor.black.withAlphaComponent(0.35).cgColor)
+        for (h, center) in handles {
+            let isHot = (activeHighlight == .resizeAnnotation(annot.id, h))
+            let radius: CGFloat = isHot ? 5.6 : 4.5
+            let circle = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
+            ctx.setFillColor((isHot ? PixTheme.accent : NSColor.white).cgColor)
+            ctx.fillEllipse(in: circle)
+            ctx.setStrokeColor((isHot ? NSColor.white : PixTheme.accent).cgColor)
+            ctx.setLineWidth(isHot ? 1.8 : 1.5)
+            ctx.strokeEllipse(in: circle)
+        }
+        ctx.restoreGState()
+    }
+
+    private func hitTestSelectedAnnotationResizeHandle(at point: CGPoint) -> HandleType? {
+        guard let annot = selectedAnnotation, annot.supportsResizeHandles else { return nil }
+        if let h = annot.hitTestResizeHandle(at: point, radius: 12.0) {
+            return .resizeAnnotation(annot.id, h)
+        }
+        return nil
+    }
+
+    /// Unified resize handle hit test combining selected annotation handles and outer selection box handles.
+    /// Inside `selectionRect`, the selected annotation's handles take priority; outside, the outer crop box takes priority.
+    private func hitTestActiveResizeHandle(at point: CGPoint) -> HandleType? {
+        if selectionRect.contains(point) {
+            return hitTestSelectedAnnotationResizeHandle(at: point) ?? hitTestResizeHandle(at: point)
+        } else {
+            return hitTestResizeHandle(at: point) ?? hitTestSelectedAnnotationResizeHandle(at: point)
+        }
     }
 
     private func drawHandles(in ctx: CGContext) {
@@ -1801,6 +1928,39 @@ public final class OverlayView: NSView {
         switch h {
         case .move, .moveAnnotation:
             NSCursor.openHand.set()
+        case .resizeAnnotation(_, let annotHandle):
+            switch annotHandle {
+            case .top, .bottom:
+                NSCursor.resizeUpDown.set()
+            case .left, .right:
+                NSCursor.resizeLeftRight.set()
+            case .topLeft:
+                if #available(macOS 15.0, *) {
+                    NSCursor.frameResize(position: .topLeft, directions: .all).set()
+                } else {
+                    NSCursor.crosshair.set()
+                }
+            case .bottomRight:
+                if #available(macOS 15.0, *) {
+                    NSCursor.frameResize(position: .bottomRight, directions: .all).set()
+                } else {
+                    NSCursor.crosshair.set()
+                }
+            case .topRight:
+                if #available(macOS 15.0, *) {
+                    NSCursor.frameResize(position: .topRight, directions: .all).set()
+                } else {
+                    NSCursor.crosshair.set()
+                }
+            case .bottomLeft:
+                if #available(macOS 15.0, *) {
+                    NSCursor.frameResize(position: .bottomLeft, directions: .all).set()
+                } else {
+                    NSCursor.crosshair.set()
+                }
+            case .arrowStart, .arrowEnd:
+                NSCursor.crosshair.set()
+            }
         case .top, .bottom:
             NSCursor.resizeUpDown.set()
         case .left, .right:
