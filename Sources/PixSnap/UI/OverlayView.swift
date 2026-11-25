@@ -22,11 +22,12 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
     var onCancel: (() -> Void)?
 
     private var maxBounds: CGRect
+    private let dashedBorder = CAShapeLayer()
 
     init(origin: CGPoint, color: NSColor, fontSize: CGFloat, maxBounds: CGRect) {
         self.maxBounds = maxBounds
-        let initW: CGFloat = 150
-        let initH: CGFloat = max(30, ceil(fontSize * 1.45) + 8)
+        let initW: CGFloat = max(28, ceil(fontSize * 1.4))
+        let initH: CGFloat = max(24, ceil(fontSize * 1.38) + 6)
 
         let clampedX = min(max(maxBounds.minX + 2, origin.x), max(maxBounds.minX + 2, maxBounds.maxX - initW - 2))
         let clampedY = min(max(maxBounds.minY + 2, origin.y - initH / 2), max(maxBounds.minY + 2, maxBounds.maxY - initH - 2))
@@ -35,42 +36,103 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
 
         self.delegate = self
         self.isBordered = false
+        self.isBezeled = false
         self.drawsBackground = false
         self.backgroundColor = .clear
         self.textColor = color
         self.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
         self.focusRingType = .none
-        self.placeholderString = "输入文字 (↵ 确认 · ⇧↵ 换行)"
+        self.placeholderString = nil
         self.usesSingleLineMode = false
         self.lineBreakMode = .byWordWrapping
         self.cell?.wraps = false
         self.cell?.isScrollable = true
 
         self.wantsLayer = true
-        self.layer?.cornerRadius = 5
-        self.layer?.borderWidth = 1.2
-        self.layer?.borderColor = PixTheme.accent.withAlphaComponent(0.9).cgColor
-        self.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.38).cgColor
+        self.layer?.backgroundColor = NSColor.clear.cgColor
+        self.layer?.borderWidth = 0
+
+        dashedBorder.fillColor = nil
+        dashedBorder.lineWidth = 1.0
+        dashedBorder.lineDashPattern = [4, 3]
+        dashedBorder.strokeColor = color.withAlphaComponent(0.55).cgColor
+        self.layer?.addSublayer(dashedBorder)
+        updateDashedBorderPath()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    override var isOpaque: Bool { false }
+
+    override func layout() {
+        super.layout()
+        updateDashedBorderPath()
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok {
+            configureActiveEditor()
+        }
+        return ok
+    }
+
+    override func textDidBeginEditing(_ notification: Notification) {
+        super.textDidBeginEditing(notification)
+        configureActiveEditor()
+    }
+
+    func configureActiveEditor() {
+        guard let editor = currentEditor() as? NSTextView else { return }
+        editor.drawsBackground = false
+        editor.backgroundColor = .clear
+        editor.insertionPointColor = textColor ?? PixTheme.accent
+        editor.isRichText = false
+        editor.enclosingScrollView?.drawsBackground = false
+        editor.enclosingScrollView?.backgroundColor = .clear
+    }
+
+    private func updateDashedBorderPath() {
+        dashedBorder.frame = bounds
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        dashedBorder.path = CGPath(roundedRect: rect, cornerWidth: 3, cornerHeight: 3, transform: nil)
+    }
+
     func updateStyle(color: NSColor, fontSize: CGFloat) {
         self.textColor = color
         self.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        dashedBorder.strokeColor = color.withAlphaComponent(0.55).cgColor
+        configureActiveEditor()
         resizeToFitContent()
     }
 
     func resizeToFitContent() {
         let currentFont = font ?? NSFont.systemFont(ofSize: 19, weight: .semibold)
-        let displayStr = stringValue.isEmpty ? "输入文字..." : stringValue
-        let measured = (displayStr as NSString).size(withAttributes: [.font: currentFont])
-        let maxAvailW = max(120, maxBounds.maxX - frame.minX - 4)
-        let newW = min(maxAvailW, max(130, ceil(measured.width) + 22))
-        let newH = max(ceil(currentFont.pointSize * 1.45) + 8, ceil(measured.height) + 10)
+        let text = stringValue
+        let minW = max(28, ceil(currentFont.pointSize * 1.4))
+        let lineH = ceil(currentFont.pointSize * 1.38)
+        let maxAvailW = max(minW, maxBounds.maxX - frame.minX - 4)
+
+        let newW: CGFloat
+        let newH: CGFloat
+        if text.isEmpty {
+            newW = minW
+            newH = max(24, lineH + 6)
+        } else {
+            let lines = text.components(separatedBy: "\n")
+            var widest: CGFloat = 0
+            for line in lines {
+                let measured = ((line.isEmpty ? " " : line) as NSString).size(withAttributes: [.font: currentFont])
+                widest = max(widest, measured.width)
+            }
+            newW = min(maxAvailW, max(minW, ceil(widest) + 16))
+            newH = max(lineH + 6, CGFloat(lines.count) * lineH + 6)
+        }
+
         // Keep top-left anchored visually while growing
         let topY = frame.maxY
         frame = NSRect(x: frame.minX, y: max(maxBounds.minY + 2, topY - newH), width: newW, height: newH)
+        updateDashedBorderPath()
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -156,7 +218,7 @@ public final class OverlayView: NSView {
     private var dragOriginalAnnotation: Annotation?
     private var didMoveAnnotationDuringDrag: Bool = false
     private var nextCounterNumber: Int = 1
-    private var activeTextField: InlineTextField?
+    internal private(set) var activeTextField: InlineTextField?
 
     // Lazy effect images (generated ONLY when Mosaic/Blur tool is actually used!)
     nonisolated private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -1286,6 +1348,7 @@ public final class OverlayView: NSView {
         addSubview(field)
         self.activeTextField = field
         window?.makeFirstResponder(field)
+        field.configureActiveEditor()
     }
 
     private func commitInlineText() {

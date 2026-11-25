@@ -180,4 +180,21 @@ struct OverlaySelectionResizeTests {
         #expect(view.annotations[1].startPoint == CGPoint(x: 500, y: 300))
         #expect(view.annotations[1].endPoint == CGPoint(x: 740, y: 420))
     }
+
+    @Test func inlineTextEditorIsTransparentWithNoGrayBackgroundOrPlaceholder() throws {
+        let (win, view) = try makeOverlay()
+        defer { win.closeOverlay() }
+
+        try drag(view, from: CGPoint(x: 200, y: 550), to: CGPoint(x: 750, y: 180))
+        view.toolbar.setActiveTool(.text)
+        view.mouseDown(with: try makeMouseEvent(.leftMouseDown, at: CGPoint(x: 360, y: 360)))
+
+        let field = try #require(view.activeTextField)
+        #expect(field.drawsBackground == false)
+        #expect(field.backgroundColor == .clear)
+        #expect(field.isOpaque == false)
+        #expect((field.layer?.backgroundColor?.alpha ?? 0) == 0)
+        #expect(field.placeholderString == nil)
+        #expect(field.frame.width < 60) // Compact caret box, no giant empty placeholder box
+    }
 }

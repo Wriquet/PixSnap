@@ -113,17 +113,24 @@ public enum AnnotationRenderer {
             // Explicitly bind NSGraphicsContext so offscreen CGContext renders text reliably!
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-            let shadow = NSShadow()
-            shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
-            shadow.shadowOffset = NSSize(width: 0, height: -1)
-            shadow.shadowBlurRadius = 2.5
 
             let font = NSFont.systemFont(ofSize: annot.fontSize, weight: .semibold)
-            let attrs: [NSAttributedString.Key: Any] = [
+            var attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: annot.color,
-                .shadow: shadow
+                .foregroundColor: annot.color
             ]
+            // Only add a gentle legibility shadow for very light ink (e.g. white/yellow);
+            // saturated & dark ink stays razor-sharp with no gray smudge underneath.
+            if let rgb = annot.color.usingColorSpace(.sRGB) {
+                let luma = 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
+                if luma > 0.72 {
+                    let shadow = NSShadow()
+                    shadow.shadowColor = NSColor.black.withAlphaComponent(0.40)
+                    shadow.shadowOffset = NSSize(width: 0, height: -0.8)
+                    shadow.shadowBlurRadius = 1.8
+                    attrs[.shadow] = shadow
+                }
+            }
             (annot.text as NSString).draw(at: annot.startPoint, withAttributes: attrs)
             NSGraphicsContext.restoreGraphicsState()
 
