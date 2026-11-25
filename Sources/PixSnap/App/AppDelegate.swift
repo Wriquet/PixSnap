@@ -8,7 +8,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController!
     private var activeOverlays: [OverlayWindow] = []
     private var activePins: [PinWindow] = []
-    private let pinHistory = PinHistoryStore(maxCount: 20)
+    private lazy var pinHistory = PinHistoryStore(
+        directoryURL: AppSettings.shared.pinHistoryDirectoryURL,
+        maxCount: AppSettings.shared.pinHistoryLimit.rawValue
+    )
+    private var pinHistoryConfigObserver: NSObjectProtocol?
     private var preferencesWindow: PreferencesWindow?
     private var isStartingCapture: Bool = false
 
@@ -28,6 +32,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusBarController.onRestoreSpecificPinRequested = { [weak self] id in
             self?.restoreClosedPin(id: id)
+        }
+        statusBarController.onOpenPinHistoryFolderRequested = { [weak self] in
+            self?.openPinHistoryFolder()
+        }
+        statusBarController.onChoosePinHistoryFolderRequested = { [weak self] in
+            self?.choosePinHistoryFolderFromMenu()
+        }
+        statusBarController.onMenuWillOpen = { [weak self] in
+            guard let self else { return }
+            self.pinHistory.reloadFromDisk()
+            self.syncStatusBarPinState()
+        }
+        statusBarController.thumbnailProvider = { [weak self] record in
+            self?.pinHistory.thumbnail(for: record)
         }
         statusBarController.onClearPinHistoryRequested = { [weak self] in
             self?.clearPinHistory()
@@ -65,6 +83,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         HotKeyManager.shared.registerAll()
 
+        pinHistoryConfigObserver = NotificationCenter.default.addObserver(
+            forName: AppSettings.pinHistoryConfigDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.pinHistory.setDirectory(AppSettings.shared.pinHistoryDirectoryURL)
+                self.pinHistory.setMaxCount(AppSettings.shared.pinHistoryLimit.rawValue)
+                self.syncStatusBarPinState()
+            }
+        }
+        syncStatusBarPinState()
+
         print("🚀 PixSnap 2.0 已成功启动并常驻菜单栏！")
         print("💡 区域截图：\(HotKeyManager.shared.displayString(for: .capture))")
         print("💡 贴剪贴板：\(HotKeyManager.shared.displayString(for: .pinClipboard))")
@@ -73,6 +105,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        // Persist any still-open pins to the disk history folder so restarting never loses them
+        if !activePins.isEmpty {
+            for pin in activePins {
+                if let extURL = pin.sourceExternalFileURL {
+                    pinHistory.markExternalPinClosed(fileURL: extURL)
+                } else {
+                    pinHistory.push(pin.makeHistoryRecord())
+                }
+            }
+        }
+        pinHistory.flushPendingWrites()
         HotKeyManager.shared.unregisterAll()
     }
 
@@ -276,7 +319,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func registerAndShowPin(_ pin: PinWindow) {
         pin.onClosed = { [weak self] closedPin in
             guard let self else { return }
-            self.pinHistory.push(closedPin.makeHistoryRecord())
+            if let extURL = closedPin.sourceExternalFileURL {
+                self.pinHistory.markExternalPinClosed(fileURL: extURL)
+            } else {
+                self.pinHistory.push(closedPin.makeHistoryRecord())
+            }
             self.activePins.removeAll { $0 === closedPin }
             self.syncStatusBarPinState()
         }
@@ -301,35 +348,77 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func restoreLatestClosedPin() {
-        guard let record = pinHistory.popLatest() else {
-            ToastHUD.shared.show("暂无可恢复的历史贴图", symbolName: "clock.arrow.circlepath", accentColor: .systemOrange, duration: 1.4)
+        if pinHistory.isEmpty {
+            pinHistory.reloadFromDisk()
+        }
+        guard let record = pinHistory.popLatest(),
+              let loadedImage = pinHistory.loadImage(for: record) else {
+            syncStatusBarPinState()
+            ToastHUD.shared.show("历史文件夹中暂无可恢复的贴图", symbolName: "clock.arrow.circlepath", accentColor: .systemOrange, duration: 1.5)
             return
         }
-        let pin = PinWindow(restoring: record)
+        let pin = PinWindow(restoring: record, image: loadedImage)
         registerAndShowPin(pin)
         let remaining = pinHistory.count
-        let msg = remaining > 0 ? "已恢复上一张贴图（还可回滚 \(remaining) 张）" : "已恢复上一张贴图"
+        let msg = remaining > 0 ? "已恢复贴图（目录中还有 \(remaining) 张）" : "已恢复贴图"
         ToastHUD.shared.show(msg, symbolName: "arrow.uturn.backward.circle.fill", accentColor: .systemBlue, duration: 1.5)
     }
 
     public func restoreClosedPin(id: UUID) {
-        guard let record = pinHistory.take(id: id) else { return }
-        let pin = PinWindow(restoring: record)
+        guard let record = pinHistory.take(id: id),
+              let loadedImage = pinHistory.loadImage(for: record) else {
+            pinHistory.reloadFromDisk()
+            syncStatusBarPinState()
+            ToastHUD.shared.show("该贴图文件已不存在", symbolName: "exclamationmark.circle", accentColor: .systemOrange, duration: 1.4)
+            return
+        }
+        let pin = PinWindow(restoring: record, image: loadedImage)
         registerAndShowPin(pin)
-        ToastHUD.shared.show("已恢复所选历史贴图", symbolName: "arrow.uturn.backward.circle.fill", accentColor: .systemBlue, duration: 1.4)
+        ToastHUD.shared.show("已从历史目录恢复贴图", symbolName: "arrow.uturn.backward.circle.fill", accentColor: .systemBlue, duration: 1.4)
+    }
+
+    public func openPinHistoryFolder() {
+        let dir = AppSettings.shared.pinHistoryDirectoryURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    public func choosePinHistoryFolderFromMenu() {
+        let panel = NSOpenPanel()
+        panel.title = "选择贴图历史文件夹"
+        panel.message = "关闭的贴图会自动保存至此文件夹（不占内存），也会读取目录中已有图片供随时恢复。"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = AppSettings.shared.pinHistoryDirectoryURL
+
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, let url = panel.url {
+            AppSettings.shared.pinHistoryDirectoryURL = url
+            pinHistory.setDirectory(url)
+            syncStatusBarPinState()
+            preferencesWindow?.refreshControlStates()
+            let count = pinHistory.count
+            let msg = count > 0 ? "已切换贴图目录，发现 \(count) 张可恢复图片" : "已切换贴图历史文件夹"
+            ToastHUD.shared.show(msg, symbolName: "folder.fill", accentColor: .systemBlue, duration: 2.0)
+        }
     }
 
     public func clearPinHistory() {
         pinHistory.clear()
         syncStatusBarPinState()
-        ToastHUD.shared.show("已清空贴图历史记录", symbolName: "trash", accentColor: .systemGray, duration: 1.3)
+        ToastHUD.shared.show("已清空 PixSnap 贴图缓存（外部原图不受影响）", symbolName: "trash", accentColor: .systemGray, duration: 1.6)
     }
 
     public func closeAllPins() {
         let pins = activePins
         activePins.removeAll()
         for pin in pins {
-            pinHistory.push(pin.makeHistoryRecord())
+            if let extURL = pin.sourceExternalFileURL {
+                pinHistory.markExternalPinClosed(fileURL: extURL)
+            } else {
+                pinHistory.push(pin.makeHistoryRecord())
+            }
             pin.onClosed = nil
             pin.closePin()
         }
@@ -351,7 +440,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func syncStatusBarPinState() {
         let clickThroughCount = activePins.filter(\.isClickThrough).count
         statusBarController.updatePinCounts(total: activePins.count, clickThroughCount: clickThroughCount)
-        statusBarController.updatePinHistory(pinHistory.recentFirst)
+        statusBarController.updatePinHistory(pinHistory.recentFirst, managedCount: pinHistory.managedCount)
     }
 
     // MARK: - Preferences & Permissions

@@ -884,6 +884,9 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
     private let autoCopyOnSaveSwitch = NSSwitch()
     private let saveDirLabel = NSTextField(labelWithString: "")
     private let formatPopup = NSPopUpButton()
+    private let pinHistoryDirLabel = NSTextField(labelWithString: "")
+    private var pinHistoryResetBtn: NSButton?
+    private let pinHistoryLimitPopup = NSPopUpButton()
 
     // Capture & Pin controls
     private let magnifierSwitch = NSSwitch()
@@ -993,6 +996,9 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
         autoCopyOnSaveSwitch.state = s.autoCopyOnSave ? .on : .off
         saveDirLabel.stringValue = s.saveDirectoryURL.path
         formatPopup.selectItem(at: SaveImageFormat.allCases.firstIndex(of: s.saveFormat) ?? 0)
+        pinHistoryDirLabel.stringValue = s.pinHistoryDirectoryURL.path
+        pinHistoryResetBtn?.isHidden = !s.isUsingCustomPinHistoryDirectory
+        pinHistoryLimitPopup.selectItem(at: PinHistoryLimit.allCases.firstIndex(of: s.pinHistoryLimit) ?? 1)
 
         magnifierSwitch.state = s.showMagnifier ? .on : .off
         windowDetectSwitch.state = s.enableWindowDetection ? .on : .off
@@ -1129,6 +1135,63 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
         let saveCard = SettingsCardView(rows: [dirRow, fmtRow])
         stack.addArrangedSubview(saveCard)
         saveCard.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+
+        // Pin History Disk Folder section
+        stack.addArrangedSubview(makeSectionHeader("贴图历史存储（磁盘缓存，不占内存）"))
+
+        let pinDirRow = makeRowContainer()
+        let pinDirLeft = NSStackView()
+        pinDirLeft.orientation = .vertical
+        pinDirLeft.alignment = .leading
+        pinDirLeft.spacing = 3
+        let pinDirTitle = NSTextField(labelWithString: "贴图历史文件夹")
+        pinDirTitle.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        pinHistoryDirLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        pinHistoryDirLabel.textColor = .secondaryLabelColor
+        pinHistoryDirLabel.lineBreakMode = .byTruncatingMiddle
+        pinHistoryDirLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        pinDirLeft.addArrangedSubview(pinDirTitle)
+        pinDirLeft.addArrangedSubview(pinHistoryDirLabel)
+
+        let pinChooseBtn = makeGlassButton(title: "选择…", symbol: "folder", controlSize: .small, target: self, action: #selector(choosePinHistoryDirectory))
+        let pinRevealBtn = makeGlassButton(title: "打开", symbol: "arrow.up.forward.square", controlSize: .small, target: self, action: #selector(revealPinHistoryDirectory))
+        let pinResetBtn = makeGlassButton(title: "默认", controlSize: .small, target: self, action: #selector(resetPinHistoryDirectory))
+        self.pinHistoryResetBtn = pinResetBtn
+
+        pinDirRow.addArrangedSubview(pinDirLeft)
+        pinDirRow.addArrangedSubview(makeSpacer())
+        pinDirRow.addArrangedSubview(pinResetBtn)
+        pinDirRow.addArrangedSubview(pinChooseBtn)
+        pinDirRow.addArrangedSubview(pinRevealBtn)
+
+        for limit in PinHistoryLimit.allCases {
+            pinHistoryLimitPopup.addItem(withTitle: limit.displayName)
+        }
+        applyGlassPopupStyle(pinHistoryLimitPopup)
+        pinHistoryLimitPopup.target = self
+        pinHistoryLimitPopup.action = #selector(pinHistoryLimitChanged)
+
+        let limitRow = makeRowContainer()
+        let limitLeft = NSStackView()
+        limitLeft.orientation = .vertical
+        limitLeft.alignment = .leading
+        limitLeft.spacing = 2
+        let limitTitle = NSTextField(labelWithString: "自动保留上限")
+        limitTitle.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        let limitSub = NSTextField(labelWithString: "重启后仍可恢复，自动读取目录已有图片且绝不删原图")
+        limitSub.font = NSFont.systemFont(ofSize: 11)
+        limitSub.textColor = .secondaryLabelColor
+        limitSub.lineBreakMode = .byTruncatingTail
+        limitSub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        limitLeft.addArrangedSubview(limitTitle)
+        limitLeft.addArrangedSubview(limitSub)
+        limitRow.addArrangedSubview(limitLeft)
+        limitRow.addArrangedSubview(makeSpacer())
+        limitRow.addArrangedSubview(pinHistoryLimitPopup)
+
+        let pinHistoryCard = SettingsCardView(rows: [pinDirRow, limitRow])
+        stack.addArrangedSubview(pinHistoryCard)
+        pinHistoryCard.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
 
         return stack
     }
@@ -1578,6 +1641,39 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
         let idx = formatPopup.indexOfSelectedItem
         if idx >= 0 && idx < SaveImageFormat.allCases.count {
             AppSettings.shared.saveFormat = SaveImageFormat.allCases[idx]
+        }
+    }
+
+    @objc private func choosePinHistoryDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = AppSettings.shared.pinHistoryDirectoryURL
+        panel.beginSheetModal(for: self) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            AppSettings.shared.pinHistoryDirectoryURL = url
+            self?.pinHistoryDirLabel.stringValue = url.path
+            self?.pinHistoryResetBtn?.isHidden = !AppSettings.shared.isUsingCustomPinHistoryDirectory
+        }
+    }
+
+    @objc private func revealPinHistoryDirectory() {
+        let dir = AppSettings.shared.pinHistoryDirectoryURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    @objc private func resetPinHistoryDirectory() {
+        AppSettings.shared.resetPinHistoryDirectoryToDefault()
+        pinHistoryDirLabel.stringValue = AppSettings.shared.pinHistoryDirectoryURL.path
+        pinHistoryResetBtn?.isHidden = true
+    }
+
+    @objc private func pinHistoryLimitChanged() {
+        let idx = pinHistoryLimitPopup.indexOfSelectedItem
+        if idx >= 0 && idx < PinHistoryLimit.allCases.count {
+            AppSettings.shared.pinHistoryLimit = PinHistoryLimit.allCases[idx]
         }
     }
 

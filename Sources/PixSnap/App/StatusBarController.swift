@@ -1,7 +1,7 @@
 import Cocoa
 
 @MainActor
-public final class StatusBarController: NSObject {
+public final class StatusBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var captureMenuItem: NSMenuItem!
     private var ocrMenuItem: NSMenuItem!
@@ -17,10 +17,14 @@ public final class StatusBarController: NSObject {
     public var onPinClipboardRequested: (() -> Void)?
     public var onRestoreLatestPinRequested: (() -> Void)?
     public var onRestoreSpecificPinRequested: ((UUID) -> Void)?
+    public var onOpenPinHistoryFolderRequested: (() -> Void)?
+    public var onChoosePinHistoryFolderRequested: (() -> Void)?
     public var onClearPinHistoryRequested: (() -> Void)?
     public var onCloseAllPinsRequested: (() -> Void)?
     public var onRestoreClickThroughRequested: (() -> Void)?
     public var onPreferencesRequested: (() -> Void)?
+    public var onMenuWillOpen: (() -> Void)?
+    public var thumbnailProvider: ((ClosedPinRecord) -> NSImage?)?
 
     public override init() {
         super.init()
@@ -37,6 +41,7 @@ public final class StatusBarController: NSObject {
 
         let menu = NSMenu()
         menu.autoenablesItems = false
+        menu.delegate = self
 
         captureMenuItem = NSMenuItem(title: "", action: #selector(captureClicked), keyEquivalent: "")
         captureMenuItem.target = self
@@ -61,12 +66,12 @@ public final class StatusBarController: NSObject {
         restoreLatestPinMenuItem.isEnabled = false
         menu.addItem(restoreLatestPinMenuItem)
 
-        recentPinsSubmenu = NSMenu(title: "最近关闭的贴图")
+        recentPinsSubmenu = NSMenu(title: "贴图历史与目录")
         recentPinsSubmenu.autoenablesItems = false
-        recentPinsMenuItem = NSMenuItem(title: "最近关闭的贴图", action: nil, keyEquivalent: "")
+        recentPinsMenuItem = NSMenuItem(title: "贴图历史与目录", action: nil, keyEquivalent: "")
         recentPinsMenuItem.image = menuIcon("clock.arrow.circlepath")
         recentPinsMenuItem.submenu = recentPinsSubmenu
-        recentPinsMenuItem.isEnabled = false
+        recentPinsMenuItem.isEnabled = true
         menu.addItem(recentPinsMenuItem)
 
         closePinsMenuItem = NSMenuItem(title: "关闭所有贴图", action: #selector(closePinsClicked), keyEquivalent: "")
@@ -101,7 +106,13 @@ public final class StatusBarController: NSObject {
 
         statusItem.menu = menu
         refreshShortcutTitles()
-        updatePinHistory([])
+        updatePinHistory([], managedCount: 0)
+    }
+
+    public func menuWillOpen(_ menu: NSMenu) {
+        if menu === statusItem.menu {
+            onMenuWillOpen?()
+        }
     }
 
     /// 极简裁切框矢量菜单栏图标（18×18pt template，自动适配深/浅色菜单栏与 Retina 屏）
@@ -181,38 +192,61 @@ public final class StatusBarController: NSObject {
         }
     }
 
-    public func updatePinHistory(_ records: [ClosedPinRecord]) {
+    public func updatePinHistory(_ records: [ClosedPinRecord], managedCount: Int? = nil) {
         let hasHistory = !records.isEmpty
+        let managed = managedCount ?? records.filter(\.isManagedByPixSnap).count
         restoreLatestPinMenuItem.isEnabled = hasHistory
-        recentPinsMenuItem.isEnabled = hasHistory
-        recentPinsMenuItem.title = hasHistory ? "最近关闭的贴图 (\(records.count))" : "最近关闭的贴图"
+        recentPinsMenuItem.isEnabled = true
+        recentPinsMenuItem.title = hasHistory ? "贴图历史与目录 (\(records.count))" : "贴图历史与目录"
 
         recentPinsSubmenu.removeAllItems()
         if records.isEmpty {
-            let emptyItem = NSMenuItem(title: "暂无关闭记录", action: nil, keyEquivalent: "")
+            let emptyItem = NSMenuItem(title: "目录中暂无历史贴图", action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
             recentPinsSubmenu.addItem(emptyItem)
-            return
-        }
-
-        for (index, record) in records.enumerated() {
-            let prefix = index == 0 ? "最新 · " : "#\(index + 1) · "
-            let item = NSMenuItem(
-                title: "\(prefix)\(record.menuTitle)",
-                action: #selector(restoreSpecificPinClicked(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.image = record.thumbnail
-            item.representedObject = record.id
-            recentPinsSubmenu.addItem(item)
+        } else {
+            let maxVisibleInMenu = 25
+            for (index, record) in records.prefix(maxVisibleInMenu).enumerated() {
+                let prefix = index == 0 ? "最新 · " : "#\(index + 1) · "
+                let item = NSMenuItem(
+                    title: "\(prefix)\(record.menuTitle)",
+                    action: #selector(restoreSpecificPinClicked(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.image = thumbnailProvider?(record) ?? record.makeMenuThumbnail()
+                item.representedObject = record.id
+                recentPinsSubmenu.addItem(item)
+            }
+            if records.count > maxVisibleInMenu {
+                let moreItem = NSMenuItem(
+                    title: "还有 \(records.count - maxVisibleInMenu) 张（快捷键可继续逐张恢复，或在文件夹查看）",
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                moreItem.isEnabled = false
+                recentPinsSubmenu.addItem(moreItem)
+            }
         }
 
         recentPinsSubmenu.addItem(NSMenuItem.separator())
-        let clearItem = NSMenuItem(title: "清空贴图历史", action: #selector(clearHistoryClicked), keyEquivalent: "")
-        clearItem.target = self
-        clearItem.image = menuIcon("trash")
-        recentPinsSubmenu.addItem(clearItem)
+        let openFolderItem = NSMenuItem(title: "打开贴图历史文件夹…", action: #selector(openPinHistoryFolderClicked), keyEquivalent: "")
+        openFolderItem.target = self
+        openFolderItem.image = menuIcon("folder")
+        recentPinsSubmenu.addItem(openFolderItem)
+
+        let chooseFolderItem = NSMenuItem(title: "指定贴图历史文件夹…", action: #selector(choosePinHistoryFolderClicked), keyEquivalent: "")
+        chooseFolderItem.target = self
+        chooseFolderItem.image = menuIcon("folder.badge.gearshape")
+        recentPinsSubmenu.addItem(chooseFolderItem)
+
+        if managed > 0 {
+            recentPinsSubmenu.addItem(NSMenuItem.separator())
+            let clearItem = NSMenuItem(title: "清空 PixSnap 贴图缓存 (\(managed))", action: #selector(clearHistoryClicked), keyEquivalent: "")
+            clearItem.target = self
+            clearItem.image = menuIcon("trash")
+            recentPinsSubmenu.addItem(clearItem)
+        }
     }
 
     @objc private func captureClicked() { onCaptureRequested?() }
@@ -223,6 +257,8 @@ public final class StatusBarController: NSObject {
         guard let id = sender.representedObject as? UUID else { return }
         onRestoreSpecificPinRequested?(id)
     }
+    @objc private func openPinHistoryFolderClicked() { onOpenPinHistoryFolderRequested?() }
+    @objc private func choosePinHistoryFolderClicked() { onChoosePinHistoryFolderRequested?() }
     @objc private func clearHistoryClicked() { onClearPinHistoryRequested?() }
     @objc private func closePinsClicked() { onCloseAllPinsRequested?() }
     @objc private func restoreClickThroughClicked() { onRestoreClickThroughRequested?() }

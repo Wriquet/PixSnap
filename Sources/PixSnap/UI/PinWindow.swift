@@ -233,6 +233,7 @@ public final class PinWindow: NSPanel {
     public var onAppearanceChanged: (() -> Void)?
     public var onRestorePreviousPinRequested: (() -> Void)?
 
+    public let sourceExternalFileURL: URL?
     public private(set) var isClickThrough: Bool = false
     public private(set) var isFolded: Bool = false
     private var preFoldSize: NSSize?
@@ -256,8 +257,10 @@ public final class PinWindow: NSPanel {
         restoredFrame: NSRect? = nil,
         restoredBaseSize: NSSize? = nil,
         restoredScale: CGFloat = 1.0,
-        restoredAlpha: CGFloat = 1.0
+        restoredAlpha: CGFloat = 1.0,
+        sourceExternalFileURL: URL? = nil
     ) {
+        self.sourceExternalFileURL = sourceExternalFileURL
         self.currentImage = image
         self.baseSize = restoredBaseSize ?? image.size
         self.currentScale = restoredScale
@@ -307,16 +310,51 @@ public final class PinWindow: NSPanel {
         }
     }
 
-    public convenience init(restoring record: ClosedPinRecord) {
-        self.init(
-            image: record.image,
-            origin: record.frame.origin,
-            preAnalysis: nil,
-            restoredFrame: record.frame,
-            restoredBaseSize: record.baseSize,
-            restoredScale: record.scale,
-            restoredAlpha: record.alphaValue
-        )
+    public convenience init(restoring record: ClosedPinRecord, image: NSImage? = nil, fallbackOrigin: CGPoint? = nil) {
+        let resolvedImage = image ?? record.image
+        if record.hasSavedWindowGeometry {
+            self.init(
+                image: resolvedImage,
+                origin: record.frame.origin,
+                preAnalysis: nil,
+                restoredFrame: record.frame,
+                restoredBaseSize: record.baseSize,
+                restoredScale: record.scale,
+                restoredAlpha: record.alphaValue,
+                sourceExternalFileURL: nil
+            )
+        } else {
+            // External image from user-chosen folder: fit neatly on screen & center near cursor
+            let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+                ?? NSScreen.main
+                ?? NSScreen.screens.first
+            let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+            let maxW = vis.width * 0.75
+            let maxH = vis.height * 0.75
+            let rawSize = resolvedImage.size
+            let fitScale = min(1.0, min(maxW / max(1, rawSize.width), maxH / max(1, rawSize.height)))
+            let displaySize = NSSize(
+                width: max(40, round(rawSize.width * fitScale)),
+                height: max(40, round(rawSize.height * fitScale))
+            )
+            let anchor = fallbackOrigin ?? NSEvent.mouseLocation
+            var origin = CGPoint(
+                x: round(anchor.x - displaySize.width / 2.0),
+                y: round(anchor.y - displaySize.height / 2.0)
+            )
+            origin.x = max(vis.minX + 16, min(vis.maxX - displaySize.width - 16, origin.x))
+            origin.y = max(vis.minY + 16, min(vis.maxY - displaySize.height - 16, origin.y))
+            self.init(
+                image: resolvedImage,
+                origin: origin,
+                preAnalysis: nil,
+                restoredFrame: NSRect(origin: origin, size: displaySize),
+                restoredBaseSize: rawSize,
+                restoredScale: fitScale,
+                restoredAlpha: 1.0,
+                sourceExternalFileURL: record.fileURL
+            )
+        }
     }
 
     public func makeHistoryRecord() -> ClosedPinRecord {

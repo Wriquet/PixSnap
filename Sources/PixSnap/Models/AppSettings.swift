@@ -102,6 +102,22 @@ public enum PinZoomAnchorMode: String, CaseIterable, Sendable {
     }
 }
 
+public enum PinHistoryLimit: Int, CaseIterable, Sendable {
+    case count50 = 50
+    case count100 = 100
+    case count300 = 300
+    case unlimited = 0
+
+    public var displayName: String {
+        switch self {
+        case .count50: return "最多保留 50 张"
+        case .count100: return "最多保留 100 张（默认）"
+        case .count300: return "最多保留 300 张"
+        case .unlimited: return "不限制数量"
+        }
+    }
+}
+
 @MainActor
 public final class AppSettings {
     public static let shared = AppSettings()
@@ -111,6 +127,8 @@ public final class AppSettings {
     private enum Keys {
         static let saveDirectoryPath = "pixsnap_save_directory"
         static let saveFormat = "pixsnap_save_format"
+        static let pinHistoryDirectoryPath = "pixsnap_pin_history_directory"
+        static let pinHistoryLimit = "pixsnap_pin_history_limit"
         static let jpegQuality = "pixsnap_jpeg_quality"
         static let autoCopyOnSave = "pixsnap_auto_copy_on_save"
         static let playCaptureSound = "pixsnap_play_sound"
@@ -132,10 +150,60 @@ public final class AppSettings {
 
     /// Posted on the main actor whenever `toolbarGlassOpacity` changes (live-updates open toolbars).
     public static let toolbarGlassOpacityDidChange = Notification.Name("PixSnapToolbarGlassOpacityDidChange")
+    /// Posted on the main actor whenever the pin history directory or retention limit changes.
+    public static let pinHistoryConfigDidChange = Notification.Name("PixSnapPinHistoryConfigDidChange")
     public static let toolbarGlassOpacityRange: ClosedRange<CGFloat> = 0.2...1.0
     public static let toolbarGlassOpacityDefault: CGFloat = 0.6
 
     private init() {}
+
+    public static var defaultPinHistoryDirectoryURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        return appSupport
+            .appendingPathComponent("PixSnap", isDirectory: true)
+            .appendingPathComponent("PinHistory", isDirectory: true)
+    }
+
+    /// Directory where closed pins are persisted as PNGs (zero-RAM disk history) and external images can be restored.
+    public var pinHistoryDirectoryURL: URL {
+        get {
+            if let path = ud.string(forKey: Keys.pinHistoryDirectoryPath), !path.isEmpty {
+                let url = URL(fileURLWithPath: path, isDirectory: true)
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                    return url
+                }
+            }
+            return Self.defaultPinHistoryDirectoryURL
+        }
+        set {
+            ud.set(newValue.path, forKey: Keys.pinHistoryDirectoryPath)
+            NotificationCenter.default.post(name: Self.pinHistoryConfigDidChange, object: nil)
+        }
+    }
+
+    public var isUsingCustomPinHistoryDirectory: Bool {
+        guard let path = ud.string(forKey: Keys.pinHistoryDirectoryPath), !path.isEmpty else { return false }
+        return path != Self.defaultPinHistoryDirectoryURL.path
+    }
+
+    public func resetPinHistoryDirectoryToDefault() {
+        ud.removeObject(forKey: Keys.pinHistoryDirectoryPath)
+        NotificationCenter.default.post(name: Self.pinHistoryConfigDidChange, object: nil)
+    }
+
+    /// Auto-pruning retention cap for PixSnap-managed closed pin files (`0` = unlimited).
+    public var pinHistoryLimit: PinHistoryLimit {
+        get {
+            guard ud.object(forKey: Keys.pinHistoryLimit) != nil else { return .count100 }
+            return PinHistoryLimit(rawValue: ud.integer(forKey: Keys.pinHistoryLimit)) ?? .count100
+        }
+        set {
+            ud.set(newValue.rawValue, forKey: Keys.pinHistoryLimit)
+            NotificationCenter.default.post(name: Self.pinHistoryConfigDidChange, object: nil)
+        }
+    }
 
     public var saveDirectoryURL: URL {
         get {
