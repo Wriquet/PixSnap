@@ -137,6 +137,7 @@ public final class OverlayView: NSView {
     private var dragStartPoint: CGPoint = .zero
     private var isMouseDown: Bool = false
     private var activeHandle: HandleType?
+    private var hoveredResizeHandle: HandleType?
     private var initialSelectionRect: CGRect = .zero
 
     private enum HandleType: Hashable {
@@ -772,10 +773,21 @@ public final class OverlayView: NSView {
 
         case .selected:
             if toolbar.frame.contains(loc) || (!toolbar.subBar.isHidden && toolbar.subBar.frame.contains(loc)) {
+                if hoveredResizeHandle != nil {
+                    hoveredResizeHandle = nil
+                    needsDisplay = true
+                }
                 NSCursor.arrow.set()
                 return
             }
-            if toolbar.activeTool == .none {
+            let resizeHandle = hitTestResizeHandle(at: loc)
+            if resizeHandle != hoveredResizeHandle {
+                hoveredResizeHandle = resizeHandle
+                needsDisplay = true
+            }
+            if let resizeHandle {
+                updateCursor(for: resizeHandle)
+            } else if toolbar.activeTool == .none {
                 let handle = hitTestHandles(at: loc)
                 updateCursor(for: handle)
             } else if toolbar.activeTool == .text {
@@ -845,6 +857,19 @@ public final class OverlayView: NSView {
                 } else {
                     commitInlineText()
                 }
+            }
+
+            // Always allow dragging the 8 corner/midpoint handles & 4 borders to expand or adjust selection,
+            // even while an annotation tool (rect/arrow/pen/text/counter/mosaic) is active!
+            if let resizeHandle = hitTestResizeHandle(at: loc) {
+                selectedAnnotationID = nil
+                updateSubBarVisibility()
+                activeHandle = resizeHandle
+                hoveredResizeHandle = resizeHandle
+                initialSelectionRect = selectionRect
+                updateCursor(for: resizeHandle)
+                needsDisplay = true
+                return
             }
 
             // Text tool
@@ -973,6 +998,28 @@ public final class OverlayView: NSView {
             needsDisplay = true
 
         case .selected:
+            if let handle = activeHandle {
+                let dx = loc.x - dragStartPoint.x
+                let dy = loc.y - dragStartPoint.y
+
+                if case .moveAnnotation(let id) = handle,
+                   let original = dragOriginalAnnotation,
+                   let idx = annotations.firstIndex(where: { $0.id == id }) {
+                    if !didMoveAnnotationDuringDrag && hypot(dx, dy) > 1.5 {
+                        recordUndoSnapshot()
+                        didMoveAnnotationDuringDrag = true
+                    }
+                    annotations[idx] = original.translated(by: dx, dy: dy)
+                    needsDisplay = true
+                } else {
+                    selectionRect = resizeAndClampRect(initialSelectionRect, handle: handle, dx: dx, dy: dy)
+                    positionToolbars(updateGlassAppearance: false)
+                    updateCursor(for: handle)
+                    needsDisplay = true
+                }
+                return
+            }
+
             if toolbar.activeTool == .text || toolbar.activeTool == .counter {
                 return
             }
@@ -1000,24 +1047,6 @@ public final class OverlayView: NSView {
                 }
                 currentAnnotation = current
                 needsDisplay = true
-            } else if let handle = activeHandle {
-                let dx = loc.x - dragStartPoint.x
-                let dy = loc.y - dragStartPoint.y
-
-                if case .moveAnnotation(let id) = handle,
-                   let original = dragOriginalAnnotation,
-                   let idx = annotations.firstIndex(where: { $0.id == id }) {
-                    if !didMoveAnnotationDuringDrag && hypot(dx, dy) > 1.5 {
-                        recordUndoSnapshot()
-                        didMoveAnnotationDuringDrag = true
-                    }
-                    annotations[idx] = original.translated(by: dx, dy: dy)
-                    needsDisplay = true
-                } else {
-                    selectionRect = resizeAndClampRect(initialSelectionRect, handle: handle, dx: dx, dy: dy)
-                    positionToolbars()
-                    needsDisplay = true
-                }
             }
         }
     }
@@ -1070,18 +1099,31 @@ public final class OverlayView: NSView {
                         invalidateAndReschedulePreAnalysis()
                     }
                 } else {
+                    positionToolbars(updateGlassAppearance: true)
                     invalidateAndReschedulePreAnalysis()
                 }
                 activeHandle = nil
                 dragOriginalAnnotation = nil
                 didMoveAnnotationDuringDrag = false
-                updateCursor(for: hitTestHandles(at: loc))
+                let postResizeHover = hitTestResizeHandle(at: loc)
+                hoveredResizeHandle = postResizeHover
+                if let postResizeHover {
+                    updateCursor(for: postResizeHover)
+                } else if toolbar.activeTool == .none {
+                    updateCursor(for: hitTestHandles(at: loc))
+                } else if toolbar.activeTool == .text {
+                    NSCursor.iBeam.set()
+                } else {
+                    NSCursor.crosshair.set()
+                }
+                needsDisplay = true
             }
 
-            // Double-click finishes & copies ONLY when no drawing tool is active and not clicking on an annotation
+            // Double-click finishes & copies ONLY when no drawing tool is active, not on a resize handle/border, and not clicking an annotation
             if event.clickCount == 2 &&
                 toolbar.activeTool == .none &&
                 selectedAnnotationID == nil &&
+                hitTestResizeHandle(at: loc) == nil &&
                 selectionRect.contains(loc) &&
                 !toolbar.frame.contains(loc) &&
                 (toolbar.subBar.isHidden || !toolbar.subBar.frame.contains(loc)) {
@@ -1117,6 +1159,7 @@ public final class OverlayView: NSView {
         axDebounceWorkItem = nil
         pauseHoverDisplayLink()
         hoverAnimator.reset()
+        hoveredResizeHandle = nil
         state = .selected
         magnifier.isHidden = true
         onSelectionStarted?()
@@ -1140,6 +1183,8 @@ public final class OverlayView: NSView {
         undoStack.removeAll()
         redoStack.removeAll()
         selectedAnnotationID = nil
+        hoveredResizeHandle = nil
+        activeHandle = nil
         nextCounterNumber = 1
         toolbar.setActiveTool(.none, notify: false)
         toolbar.subBar.updateCounterPreview(1)
@@ -1636,55 +1681,100 @@ public final class OverlayView: NSView {
     }
 
     private func drawHandles(in ctx: CGContext) {
-        let radius: CGFloat = 4.5
-        let handles = getHandleCenters()
+        let handles = getOrderedHandles()
+        let activeHighlight = activeHandle ?? hoveredResizeHandle
 
         ctx.saveGState()
         ctx.setShadow(offset: CGSize(width: 0, height: -0.5), blur: 2, color: NSColor.black.withAlphaComponent(0.35).cgColor)
-        for center in handles.values {
+        for (type, center) in handles {
+            let isHot = (activeHighlight == type)
+            let radius: CGFloat = isHot ? 5.6 : 4.5
             let circle = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
-            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.setFillColor((isHot ? PixTheme.accent : NSColor.white).cgColor)
             ctx.fillEllipse(in: circle)
-            ctx.setStrokeColor(PixTheme.accent.cgColor)
-            ctx.setLineWidth(1.5)
+            ctx.setStrokeColor((isHot ? NSColor.white : PixTheme.accent).cgColor)
+            ctx.setLineWidth(isHot ? 1.8 : 1.5)
             ctx.strokeEllipse(in: circle)
         }
         ctx.restoreGState()
     }
 
-    private func getHandleCenters() -> [HandleType: CGPoint] {
+    /// Deterministic handle list with the 4 corners BEFORE the 4 edge midpoints so overlapping
+    /// hit zones on compact selections always prefer corner handles predictably.
+    private func getOrderedHandles() -> [(HandleType, CGPoint)] {
         let r = selectionRect
         return [
-            .topLeft: CGPoint(x: r.minX, y: r.maxY),
-            .top: CGPoint(x: r.midX, y: r.maxY),
-            .topRight: CGPoint(x: r.maxX, y: r.maxY),
-            .right: CGPoint(x: r.maxX, y: r.midY),
-            .bottomRight: CGPoint(x: r.maxX, y: r.minY),
-            .bottom: CGPoint(x: r.midX, y: r.minY),
-            .bottomLeft: CGPoint(x: r.minX, y: r.minY),
-            .left: CGPoint(x: r.minX, y: r.midY)
+            (.topLeft, CGPoint(x: r.minX, y: r.maxY)),
+            (.topRight, CGPoint(x: r.maxX, y: r.maxY)),
+            (.bottomLeft, CGPoint(x: r.minX, y: r.minY)),
+            (.bottomRight, CGPoint(x: r.maxX, y: r.minY)),
+            (.top, CGPoint(x: r.midX, y: r.maxY)),
+            (.bottom, CGPoint(x: r.midX, y: r.minY)),
+            (.left, CGPoint(x: r.minX, y: r.midY)),
+            (.right, CGPoint(x: r.maxX, y: r.midY))
         ]
     }
 
-    private func hitTestHandles(at point: CGPoint) -> HandleType? {
-        // 1. 8 circular corner/midpoint handles
-        let handleRadius: CGFloat = 9
-        for (type, center) in getHandleCenters() {
-            if hypot(point.x - center.x, point.y - center.y) <= handleRadius {
+    /// Hit-test ONLY the 8 corner/midpoint handles and 4 borders.
+    /// Uses an asymmetric comfort band (generous outside the border so expanding outward is effortless,
+    /// slightly tighter inside when an annotation tool is active so drawing near edges stays crisp).
+    private func hitTestResizeHandle(at point: CGPoint) -> HandleType? {
+        let r = selectionRect
+        guard r.width > 0 && r.height > 0 else { return nil }
+
+        let toolActive = (toolbar.activeTool != .none)
+        let isInside = r.contains(point)
+        let minDim = min(r.width, r.height)
+
+        let cornerRadius: CGFloat
+        if isInside {
+            let base: CGFloat = toolActive ? 7.5 : 10.0
+            cornerRadius = min(base, max(5.0, minDim * 0.28))
+        } else {
+            cornerRadius = 13.0
+        }
+
+        let ordered = getOrderedHandles()
+        // 1. 4 corners first (deterministic priority over edge midpoints)
+        for i in 0..<4 {
+            let (type, center) = ordered[i]
+            if hypot(point.x - center.x, point.y - center.y) <= cornerRadius {
                 return type
             }
         }
 
-        // 2. Full 4 edges (6pt hit band along each border!)
-        let edgeBand: CGFloat = 6
-        let r = selectionRect
-        if point.x >= r.minX && point.x <= r.maxX {
-            if abs(point.y - r.maxY) <= edgeBand { return .top }
-            if abs(point.y - r.minY) <= edgeBand { return .bottom }
+        // 2. 4 edge midpoint dots
+        let midRadius: CGFloat = isInside ? min(toolActive ? 7.0 : 9.5, max(4.5, minDim * 0.25)) : 12.0
+        for i in 4..<8 {
+            let (type, center) = ordered[i]
+            if hypot(point.x - center.x, point.y - center.y) <= midRadius {
+                return type
+            }
         }
-        if point.y >= r.minY && point.y <= r.maxY {
-            if abs(point.x - r.minX) <= edgeBand { return .left }
-            if abs(point.x - r.maxX) <= edgeBand { return .right }
+
+        // 3. Full 4 borders (generous 10pt outer band for effortless outward expansion)
+        let outerBand: CGFloat = 10.0
+        let innerBand: CGFloat = min(toolActive ? 4.5 : 6.5, max(3.0, minDim * 0.22))
+
+        if point.x >= r.minX - outerBand && point.x <= r.maxX + outerBand {
+            let dyTop = point.y - r.maxY
+            if dyTop >= -innerBand && dyTop <= outerBand { return .top }
+            let dyBot = r.minY - point.y
+            if dyBot >= -innerBand && dyBot <= outerBand { return .bottom }
+        }
+        if point.y >= r.minY - outerBand && point.y <= r.maxY + outerBand {
+            let dxLeft = r.minX - point.x
+            if dxLeft >= -innerBand && dxLeft <= outerBand { return .left }
+            let dxRight = point.x - r.maxX
+            if dxRight >= -innerBand && dxRight <= outerBand { return .right }
+        }
+        return nil
+    }
+
+    private func hitTestHandles(at point: CGPoint) -> HandleType? {
+        // 1 & 2. 8 circular handles + 4 borders
+        if let resizeHandle = hitTestResizeHandle(at: point) {
+            return resizeHandle
         }
 
         // 3. Existing annotation hit-test (topmost first)
@@ -1697,7 +1787,7 @@ public final class OverlayView: NSView {
         }
 
         // 4. Inside selection -> move selection
-        if r.contains(point) {
+        if selectionRect.contains(point) {
             return .move
         }
         return nil
@@ -1849,8 +1939,8 @@ public final class OverlayView: NSView {
         }
     }
 
-    private func positionToolbars() {
-        let margin: CGFloat = 10
+    private func positionToolbars(updateGlassAppearance: Bool = true) {
+        let margin: CGFloat = 14
         let gap: CGFloat = 8
         let tbW = toolbar.frame.width
         let tbH = toolbar.frame.height
@@ -1892,7 +1982,9 @@ public final class OverlayView: NSView {
             subX = max(bounds.minX + margin, min(bounds.maxX - subW - margin, subX))
             toolbar.subBar.frame.origin = CGPoint(x: round(subX), y: round(subY))
         }
-        updateToolbarGlassAppearance()
+        if updateGlassAppearance {
+            updateToolbarGlassAppearance()
+        }
     }
 
     // MARK: - Adaptive Liquid Glass (light glass on bright backdrops, dark glass on dark ones)

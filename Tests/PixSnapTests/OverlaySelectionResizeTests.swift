@@ -1,0 +1,111 @@
+import Testing
+import Cocoa
+import CoreGraphics
+@testable import PixSnap
+
+@MainActor
+struct OverlaySelectionResizeTests {
+    private func makeOverlay(size: CGSize = CGSize(width: 1000, height: 700)) throws -> (OverlayWindow, OverlayView) {
+        let cs = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let ctx = try #require(CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: Int(size.width) * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.setFillColor(NSColor.darkGray.cgColor)
+        ctx.fill(CGRect(origin: .zero, size: size))
+        let img = try #require(ctx.makeImage())
+
+        let captured = ScreenCaptureManager.CapturedScreen(
+            displayID: CGMainDisplayID(),
+            image: img,
+            screenFrame: CGRect(origin: .zero, size: size),
+            pixelSize: size,
+            scaleFactor: 1.0,
+            windows: [],
+            primaryScreenHeight: size.height
+        )
+        let win = OverlayWindow(captured: captured, isInitialActiveScreen: true)
+        return (win, win.overlayView)
+    }
+
+    private func makeMouseEvent(_ type: NSEvent.EventType, at point: CGPoint, clickCount: Int = 1) throws -> NSEvent {
+        try #require(NSEvent.mouseEvent(
+            with: type,
+            location: point,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: clickCount,
+            pressure: type == .leftMouseUp ? 0 : 1
+        ))
+    }
+
+    private func drag(_ view: OverlayView, from start: CGPoint, to end: CGPoint) throws {
+        view.mouseDown(with: try makeMouseEvent(.leftMouseDown, at: start))
+        view.mouseDragged(with: try makeMouseEvent(.leftMouseDragged, at: end))
+        view.mouseUp(with: try makeMouseEvent(.leftMouseUp, at: end))
+    }
+
+    @Test func expandSelectionViaOuterEdgeAndCornerHandles() throws {
+        let (win, view) = try makeOverlay()
+        defer { win.closeOverlay() }
+
+        // Create initial selection (300, 250, 200, 150) -> x: 300..500, y: 250..400
+        try drag(view, from: CGPoint(x: 300, y: 400), to: CGPoint(x: 500, y: 250))
+        #expect(view.state == .selected)
+        #expect(view.selectionRect == CGRect(x: 300, y: 250, width: 200, height: 150))
+
+        // Toolbar positioned below must leave >= 14pt clearance for bottom corner/edge handles
+        #expect(view.toolbar.frame.maxY <= view.selectionRect.minY - 13)
+
+        // Grab 8pt OUTSIDE the right edge and drag outward +80pt -> expands width smoothly without resetting
+        try drag(view, from: CGPoint(x: 508, y: 325), to: CGPoint(x: 588, y: 325))
+        #expect(view.state == .selected)
+        #expect(view.selectionRect == CGRect(x: 300, y: 250, width: 280, height: 150))
+
+        // Grab 10pt OUTSIDE top-left corner and drag outward (-50, +60)
+        try drag(view, from: CGPoint(x: 293, y: 407), to: CGPoint(x: 243, y: 467))
+        #expect(view.state == .selected)
+        #expect(view.selectionRect == CGRect(x: 250, y: 250, width: 330, height: 210))
+    }
+
+    @Test func expandSelectionWorksWithRectTextAndCounterToolsActive() throws {
+        let (win, view) = try makeOverlay()
+        defer { win.closeOverlay() }
+
+        // Initial selection (300, 250, 240, 180) -> x: 300..540, y: 250..430
+        try drag(view, from: CGPoint(x: 300, y: 430), to: CGPoint(x: 540, y: 250))
+        #expect(view.state == .selected)
+
+        // 1. Rect tool active: dragging bottom-right handle expands box instead of failing or drawing a rect
+        view.toolbar.setActiveTool(.rect)
+        try drag(view, from: CGPoint(x: 540, y: 250), to: CGPoint(x: 620, y: 200))
+        #expect(view.selectionRect == CGRect(x: 300, y: 200, width: 320, height: 230))
+        #expect(view.annotations.isEmpty)
+        #expect(view.toolbar.activeTool == .rect)
+
+        // Drawing well inside selectionRect with Rect tool still works normally
+        try drag(view, from: CGPoint(x: 360, y: 360), to: CGPoint(x: 460, y: 280))
+        #expect(view.annotations.count == 1)
+
+        // 2. Text tool active: dragging top edge expands upward instead of being blocked
+        view.toolbar.setActiveTool(.text)
+        try drag(view, from: CGPoint(x: 460, y: 430), to: CGPoint(x: 460, y: 500))
+        #expect(view.selectionRect == CGRect(x: 300, y: 200, width: 320, height: 300))
+        #expect(view.toolbar.activeTool == .text)
+
+        // 3. Counter tool active: dragging left edge expands leftward without placing a counter badge
+        view.toolbar.setActiveTool(.counter)
+        try drag(view, from: CGPoint(x: 294, y: 350), to: CGPoint(x: 234, y: 350))
+        #expect(view.selectionRect == CGRect(x: 240, y: 200, width: 380, height: 300))
+        #expect(view.annotations.count == 1)
+        #expect(view.toolbar.activeTool == .counter)
+    }
+}
