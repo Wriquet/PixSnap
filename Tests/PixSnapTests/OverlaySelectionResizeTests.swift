@@ -212,5 +212,54 @@ struct OverlaySelectionResizeTests {
         field.insertText("你好世界", replacementRange: NSRange(location: NSNotFound, length: 0))
         #expect(field.frame.minX == originX)
         #expect(field.stringValue == "你好世界")
+
+        // Commit via Enter -> becomes a floating text annotation on the screenshot
+        field.onCommit?()
+        #expect(view.activeTextField == nil)
+        #expect(view.annotations.count == 1)
+        #expect(view.annotations[0].type == .text)
+        #expect(view.annotations[0].text == "你好世界")
+
+        // 1. Click existing text (without dragging) while Text tool is active -> re-opens in place!
+        let textCenter = CGPoint(x: view.annotations[0].boundingBox.midX, y: view.annotations[0].boundingBox.midY)
+        view.mouseDown(with: try makeMouseEvent(.leftMouseDown, at: textCenter))
+        view.mouseUp(with: try makeMouseEvent(.leftMouseUp, at: textCenter))
+        let reopened = try #require(view.activeTextField)
+        #expect(view.editingTextAnnotationID == view.annotations[0].id)
+        #expect(reopened.stringValue == "你好世界")
+
+        // Edit text & commit -> updates existing annotation in place (no duplicate created!)
+        reopened.insertText("！", replacementRange: NSRange(location: NSNotFound, length: 0))
+        reopened.onCommit?()
+        #expect(view.activeTextField == nil)
+        #expect(view.editingTextAnnotationID == nil)
+        #expect(view.annotations.count == 1)
+        #expect(view.annotations[0].text == "你好世界！")
+
+        // 2. Dragging existing text while Text tool is active moves it instead of re-opening editor
+        let prevOrigin = view.annotations[0].startPoint
+        let movedStart = CGPoint(x: view.annotations[0].boundingBox.midX, y: view.annotations[0].boundingBox.midY)
+        try drag(view, from: movedStart, to: CGPoint(x: movedStart.x + 40, y: movedStart.y - 20))
+        #expect(view.activeTextField == nil)
+        #expect(view.annotations[0].startPoint == CGPoint(x: prevOrigin.x + 40, y: prevOrigin.y - 20))
+
+        // 3. Double-clicking existing text even when NO tool is active (.none) re-opens it for editing
+        // and its mouseUp must NOT accidentally trigger double-click copy/close!
+        var closeCount = 0
+        view.onCloseAll = { closeCount += 1 }
+        view.toolbar.setActiveTool(.none)
+        let newCenter = CGPoint(x: view.annotations[0].boundingBox.midX, y: view.annotations[0].boundingBox.midY)
+        view.mouseDown(with: try makeMouseEvent(.leftMouseDown, at: newCenter, clickCount: 2))
+        view.mouseUp(with: try makeMouseEvent(.leftMouseUp, at: newCenter, clickCount: 2))
+        #expect(closeCount == 0)
+        let reopenedFromNone = try #require(view.activeTextField)
+        #expect(reopenedFromNone.stringValue == "你好世界！")
+
+        // Esc cancels re-edit and preserves original text untouched
+        reopenedFromNone.insertText("误输入", replacementRange: NSRange(location: NSNotFound, length: 0))
+        reopenedFromNone.onCancel?()
+        #expect(view.activeTextField == nil)
+        #expect(view.annotations.count == 1)
+        #expect(view.annotations[0].text == "你好世界！")
     }
 }

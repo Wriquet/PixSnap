@@ -31,15 +31,29 @@ final class InlineTextField: NSTextView {
     private var maxBounds: CGRect
     private let dashedBorder = CAShapeLayer()
 
-    init(origin: CGPoint, color: NSColor, fontSize: CGFloat, maxBounds: CGRect) {
+    init(
+        origin: CGPoint,
+        color: NSColor,
+        fontSize: CGFloat,
+        maxBounds: CGRect,
+        initialText: String = "",
+        exactOrigin: CGPoint? = nil
+    ) {
         self.maxBounds = maxBounds
         let initFont = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
         let lineH = Self.measuredLineHeight(for: initFont)
         let initW: CGFloat = max(18, ceil(fontSize * 0.95))
         let initH: CGFloat = lineH + 2
 
-        let clampedX = min(max(maxBounds.minX + 2, origin.x), max(maxBounds.minX + 2, maxBounds.maxX - initW - 2))
-        let clampedY = min(max(maxBounds.minY + 2, origin.y - initH / 2), max(maxBounds.minY + 2, maxBounds.maxY - initH - 2))
+        let clampedX: CGFloat
+        let clampedY: CGFloat
+        if let exact = exactOrigin {
+            clampedX = max(maxBounds.minX, min(maxBounds.maxX - initW, exact.x))
+            clampedY = max(maxBounds.minY, min(maxBounds.maxY - initH, exact.y))
+        } else {
+            clampedX = min(max(maxBounds.minX + 2, origin.x), max(maxBounds.minX + 2, maxBounds.maxX - initW - 2))
+            clampedY = min(max(maxBounds.minY + 2, origin.y - initH / 2), max(maxBounds.minY + 2, maxBounds.maxY - initH - 2))
+        }
 
         let storage = NSTextStorage()
         let layoutMgr = NSLayoutManager()
@@ -81,7 +95,18 @@ final class InlineTextField: NSTextView {
         dashedBorder.lineDashPattern = [4, 3]
         dashedBorder.strokeColor = color.withAlphaComponent(0.55).cgColor
         self.layer?.addSublayer(dashedBorder)
-        updateDashedBorderPath()
+
+        if !initialText.isEmpty {
+            self.string = initialText
+            self.textStorage?.addAttributes(
+                [.font: initFont, .foregroundColor: color],
+                range: NSRange(location: 0, length: (initialText as NSString).length)
+            )
+            resizeToFitContent(preserveBottomOrigin: exactOrigin != nil)
+            self.setSelectedRange(NSRange(location: (initialText as NSString).length, length: 0))
+        } else {
+            updateDashedBorderPath()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -167,7 +192,7 @@ final class InlineTextField: NSTextView {
         resizeToFitContent()
     }
 
-    func resizeToFitContent() {
+    func resizeToFitContent(preserveBottomOrigin: Bool = false) {
         let currentFont = font ?? NSFont.systemFont(ofSize: 19, weight: .semibold)
         let minW = max(18, ceil(currentFont.pointSize * 0.95))
         let lineH = Self.measuredLineHeight(for: currentFont)
@@ -197,9 +222,15 @@ final class InlineTextField: NSTextView {
             newH = lineH + 2
         }
 
-        // Keep top-left anchored visually while growing
-        let topY = frame.maxY
-        frame = NSRect(x: frame.minX, y: max(maxBounds.minY + 2, topY - newH), width: newW, height: newH)
+        let newY: CGFloat
+        if preserveBottomOrigin {
+            newY = max(maxBounds.minY, min(maxBounds.maxY - newH, frame.minY))
+        } else {
+            // Keep top-left anchored visually while growing
+            let topY = frame.maxY
+            newY = max(maxBounds.minY + 2, topY - newH)
+        }
+        frame = NSRect(x: frame.minX, y: newY, width: newW, height: newH)
         updateDashedBorderPath()
     }
 }
@@ -266,6 +297,7 @@ public final class OverlayView: NSView {
     private var didMoveAnnotationDuringDrag: Bool = false
     private var nextCounterNumber: Int = 1
     internal private(set) var activeTextField: InlineTextField?
+    internal private(set) var editingTextAnnotationID: UUID?
 
     // Lazy effect images (generated ONLY when Mosaic/Blur tool is actually used!)
     nonisolated private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -375,6 +407,7 @@ public final class OverlayView: NSView {
         AXElementDetector.shared.resetSession()
         activeTextField?.removeFromSuperview()
         activeTextField = nil
+        editingTextAnnotationID = nil
         NSCursor.arrow.set()
     }
 
@@ -969,6 +1002,12 @@ public final class OverlayView: NSView {
                     return
                 } else {
                     commitInlineText()
+                    // Clicking empty space in text mode cleanly finishes editing instead of spawning a stray box
+                    if toolbar.activeTool == .text,
+                       hitTestActiveResizeHandle(at: loc) == nil,
+                       !annotations.reversed().contains(where: { $0.type == .text && $0.hitTest(point: loc) }) {
+                        return
+                    }
                 }
             }
 
@@ -1001,6 +1040,10 @@ public final class OverlayView: NSView {
             // (even while rect/ellipse/arrow tool is still active, instead of stacking duplicate boxes!)
             if canInteractWithExistingAnnotation(for: toolbar.activeTool),
                let hitAnnot = annotations.reversed().first(where: { $0.hitTest(point: loc) }) {
+                if hitAnnot.type == .text && event.clickCount >= 2 {
+                    startInlineTextEditor(editing: hitAnnot)
+                    return
+                }
                 selectedAnnotationID = hitAnnot.id
                 activeHandle = .moveAnnotation(hitAnnot.id)
                 dragOriginalAnnotation = hitAnnot
@@ -1018,8 +1061,21 @@ public final class OverlayView: NSView {
                 return
             }
 
-            // Text tool
+            // Text tool: click an existing text annotation to re-edit (or drag to move); click empty space to create new text
             if toolbar.activeTool == .text {
+                if let hitText = annotations.reversed().first(where: { $0.type == .text && $0.hitTest(point: loc) }) {
+                    if event.clickCount >= 2 {
+                        startInlineTextEditor(editing: hitText)
+                        return
+                    }
+                    selectedAnnotationID = hitText.id
+                    activeHandle = .moveAnnotation(hitText.id)
+                    dragOriginalAnnotation = hitText
+                    didMoveAnnotationDuringDrag = false
+                    toolbar.subBar.syncFromAnnotation(hitText)
+                    needsDisplay = true
+                    return
+                }
                 selectedAnnotationID = nil
                 if selectionRect.contains(loc) {
                     startInlineTextEditor(at: loc)
@@ -1175,9 +1231,12 @@ public final class OverlayView: NSView {
                     if !didMoveAnnotationDuringDrag && hypot(dx, dy) > 1.5 {
                         recordUndoSnapshot()
                         didMoveAnnotationDuringDrag = true
+                        NSCursor.closedHand.set()
                     }
-                    annotations[idx] = original.translated(by: dx, dy: dy)
-                    needsDisplay = true
+                    if didMoveAnnotationDuringDrag {
+                        annotations[idx] = original.translated(by: dx, dy: dy)
+                        needsDisplay = true
+                    }
                 } else {
                     selectionRect = resizeAndClampRect(initialSelectionRect, handle: handle, dx: dx, dy: dy)
                     positionToolbars(updateGlassAppearance: false)
@@ -1264,8 +1323,17 @@ public final class OverlayView: NSView {
             }
 
             if let handle = activeHandle {
+                var reopenTextTarget: Annotation?
                 switch handle {
-                case .moveAnnotation, .resizeAnnotation:
+                case .moveAnnotation(let id):
+                    if didMoveAnnotationDuringDrag {
+                        invalidateAndReschedulePreAnalysis()
+                    } else if toolbar.activeTool == .text,
+                              let textAnnot = annotations.first(where: { $0.id == id && $0.type == .text }) {
+                        // Pure click (no drag) on an existing text annotation while in Text tool -> re-edit in place!
+                        reopenTextTarget = textAnnot
+                    }
+                case .resizeAnnotation:
                     if didMoveAnnotationDuringDrag {
                         invalidateAndReschedulePreAnalysis()
                     }
@@ -1276,6 +1344,12 @@ public final class OverlayView: NSView {
                 activeHandle = nil
                 dragOriginalAnnotation = nil
                 didMoveAnnotationDuringDrag = false
+
+                if let textAnnot = reopenTextTarget {
+                    startInlineTextEditor(editing: textAnnot)
+                    return
+                }
+
                 let postResizeHover = hitTestActiveResizeHandle(at: loc)
                 hoveredResizeHandle = postResizeHover
                 if let postResizeHover {
@@ -1293,9 +1367,10 @@ public final class OverlayView: NSView {
                 needsDisplay = true
             }
 
-            // Double-click finishes & copies ONLY when no drawing tool is active, not on a resize handle/border, and not clicking an annotation
+            // Double-click finishes & copies ONLY when no drawing tool is active, not editing text, not on a resize handle/border, and not clicking an annotation
             if event.clickCount == 2 &&
                 toolbar.activeTool == .none &&
+                activeTextField == nil &&
                 selectedAnnotationID == nil &&
                 hitTestResizeHandle(at: loc) == nil &&
                 selectionRect.contains(loc) &&
@@ -1384,6 +1459,7 @@ public final class OverlayView: NSView {
 
     private func startInlineTextEditor(at point: CGPoint) {
         commitInlineText()
+        editingTextAnnotationID = nil
         let field = InlineTextField(
             origin: point,
             color: toolbar.activeColor,
@@ -1398,18 +1474,62 @@ public final class OverlayView: NSView {
         field.configureActiveEditor()
     }
 
+    private func startInlineTextEditor(editing annot: Annotation) {
+        commitInlineText()
+        editingTextAnnotationID = annot.id
+        selectedAnnotationID = nil
+        toolbar.subBar.configure(for: .text, nextCounter: nextCounterNumber)
+        toolbar.subBar.syncFromAnnotation(annot)
+        updateSubBarVisibility()
+        positionToolbars()
+
+        let exactOrigin = CGPoint(x: annot.startPoint.x - 4, y: annot.startPoint.y - 1)
+        let field = InlineTextField(
+            origin: annot.startPoint,
+            color: annot.color,
+            fontSize: annot.fontSize,
+            maxBounds: selectionRect,
+            initialText: annot.text,
+            exactOrigin: exactOrigin
+        )
+        field.onCommit = { [weak self] in self?.commitInlineText() }
+        field.onCancel = { [weak self] in self?.cancelInlineText() }
+        addSubview(field)
+        self.activeTextField = field
+        window?.makeFirstResponder(field)
+        field.configureActiveEditor()
+        needsDisplay = true
+    }
+
     private func commitInlineText() {
         guard let field = activeTextField else { return }
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let fontSize = field.font?.pointSize ?? toolbar.activeSize.fontSize
         let color = field.textColor ?? toolbar.activeColor
         let textOrigin = CGPoint(x: field.frame.minX + 4, y: field.frame.minY + 1)
+        let editingID = editingTextAnnotationID
 
         field.removeFromSuperview()
         activeTextField = nil
+        editingTextAnnotationID = nil
+        updateSubBarVisibility()
         window?.makeFirstResponder(self)
 
-        if !text.isEmpty {
+        if let editingID, let idx = annotations.firstIndex(where: { $0.id == editingID }) {
+            let old = annotations[idx]
+            if text.isEmpty {
+                recordUndoSnapshot()
+                annotations.remove(at: idx)
+                invalidateAndReschedulePreAnalysis()
+            } else if text != old.text || color != old.color || fontSize != old.fontSize || textOrigin != old.startPoint {
+                recordUndoSnapshot()
+                annotations[idx].text = text
+                annotations[idx].color = color
+                annotations[idx].fontSize = fontSize
+                annotations[idx].startPoint = textOrigin
+                invalidateAndReschedulePreAnalysis()
+            }
+        } else if !text.isEmpty {
             recordUndoSnapshot()
             annotations.append(Annotation(
                 type: .text,
@@ -1427,6 +1547,8 @@ public final class OverlayView: NSView {
         guard let field = activeTextField else { return }
         field.removeFromSuperview()
         activeTextField = nil
+        editingTextAnnotationID = nil
+        updateSubBarVisibility()
         window?.makeFirstResponder(self)
         needsDisplay = true
     }
@@ -1773,7 +1895,7 @@ public final class OverlayView: NSView {
             ctx.addPath(selPath)
             ctx.clip()
 
-            for annot in annotations {
+            for annot in annotations where annot.id != editingTextAnnotationID {
                 AnnotationRenderer.draw(
                     annot,
                     in: ctx,
@@ -2198,6 +2320,9 @@ public final class OverlayView: NSView {
         }
         if toolbar.activeTool.hasStyleBar {
             toolbar.subBar.configure(for: toolbar.activeTool, nextCounter: nextCounterNumber)
+            toolbar.subBar.isHidden = false
+        } else if activeTextField != nil {
+            toolbar.subBar.configure(for: .text, nextCounter: nextCounterNumber)
             toolbar.subBar.isHidden = false
         } else if let selID = selectedAnnotationID,
                   let selAnnot = annotations.first(where: { $0.id == selID }) {
