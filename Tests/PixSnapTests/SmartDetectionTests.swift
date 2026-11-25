@@ -278,12 +278,14 @@ struct SmartDetectionTests {
         // Inject synchronous visual detector and hover directly on the standalone browser photo
         let syncDetector = try #require(VisualRegionDetector(cgImage: img, logicalSize: screenRect.size))
         view.visualDetector = syncDetector
-        view.updateHoverTarget(at: CGPoint(x: 500, y: 320))
+        view.updateHoverTarget(at: CGPoint(x: 500, y: 320), immediate: true)
 
         #expect(view.hoverCandidates.count >= 3)
         #expect(view.hoverCandidateIndex == 0)
         #expect(view.hoveredWindow?.elementRoleLabel == "识别区域")
-        #expect(approxEqual(try #require(view.hoveredWindow?.rect), photoRect, tol: 5))
+        let initialPhotoRect = try #require(view.hoveredWindow?.rect)
+        #expect(approxEqual(initialPhotoRect, photoRect, tol: 5))
+        #expect(view.hoverAnimator.currentRect == initialPhotoRect)
 
         let upEvent = try #require(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
@@ -296,11 +298,20 @@ struct SmartDetectionTests {
             isARepeat: false, keyCode: 125
         ))
 
-        // Step outward: photo -> Chrome window -> Notes window behind
+        // Step outward: photo -> Chrome window -> animator morphs smoothly instead of hard snapping
         view.keyDown(with: upEvent)
         #expect(view.hoverCandidateIndex == 1)
         #expect(view.hoveredWindow?.rect == chromeRect)
+        #expect(view.hoverAnimator.targetRect == chromeRect)
+        #expect(view.hoverAnimator.isAnimating == true)
+        #expect(view.hoverAnimator.currentRect == initialPhotoRect)
 
+        // Small cursor jitter (3pt) right after stepping must NOT flash back to level 0
+        view.updateHoverTarget(at: CGPoint(x: 503, y: 321))
+        #expect(view.hoverCandidateIndex == 1)
+        #expect(view.hoveredWindow?.rect == chromeRect)
+
+        // Step outward again to Notes window behind
         view.keyDown(with: upEvent)
         #expect(view.hoverCandidateIndex == 2)
         #expect(view.hoveredWindow?.rect == notesRect)
@@ -310,7 +321,7 @@ struct SmartDetectionTests {
         #expect(view.hoverCandidateIndex == 1)
         #expect(view.hoveredWindow?.rect == chromeRect)
 
-        // Immediate Cmd+C copies the stepped Chrome window without clicking once
+        // Immediate Cmd+C copies the exact stepped Chrome window even mid-animation
         var closed = 0
         view.onCloseAll = { closed += 1 }
         let cmdC = try #require(NSEvent.keyEvent(
@@ -321,5 +332,53 @@ struct SmartDetectionTests {
         #expect(view.performKeyEquivalent(with: cmdC) == true)
         #expect(closed == 1)
         #expect(view.selectionRect == chromeRect)
+    }
+
+    @Test func hoverRectAnimatorMorphsSmoothlyWithoutOvershootAndSettles() {
+        var anim = HoverRectAnimator()
+        let inner = CGRect(x: 400, y: 200, width: 300, height: 200) // minX=400, maxX=700, minY=200, maxY=400
+        let outer = CGRect(x: 100, y: 100, width: 600, height: 500) // minX=100, maxX=700 (shared!), minY=100, maxY=600
+
+        // First target snaps instantaneously (never flies in from 0,0)
+        anim.setTarget(inner, immediate: true)
+        #expect(anim.currentRect == inner)
+        #expect(anim.currentAlpha == 1)
+        #expect(anim.isAnimating == false)
+
+        // Transition to outer level -> smooth critically-damped glide with ZERO overshoot
+        anim.setTarget(outer, immediate: false)
+        #expect(anim.isAnimating == true)
+
+        var prevWidth = inner.width
+        var settled = false
+        for _ in 0..<40 { // up to 333ms @ 120Hz
+            let keepGoing = anim.step(dt: 1.0 / 120.0)
+            let cur = anim.currentRect
+            // Shared right edge (maxX == 700) must stay rock-solid
+            #expect(abs(cur.maxX - 700) < 0.01)
+            // Monotonic expansion with zero overshoot past outer bounds
+            #expect(cur.width >= prevWidth - 0.01)
+            #expect(cur.minX >= outer.minX - 0.01)
+            #expect(cur.minY >= outer.minY - 0.01)
+            #expect(cur.maxY <= outer.maxY + 0.01)
+            prevWidth = cur.width
+            if !keepGoing {
+                settled = true
+                break
+            }
+        }
+
+        #expect(settled == true)
+        #expect(anim.currentRect == outer)
+        #expect(anim.isAnimating == false)
+
+        // Fading out to nil (hovering onto empty desktop) smoothly reaches alpha 0
+        anim.setTarget(nil, immediate: false)
+        #expect(anim.isAnimating == true)
+        for _ in 0..<30 {
+            if !anim.step(dt: 1.0 / 120.0) { break }
+        }
+        #expect(anim.currentAlpha == 0)
+        #expect(anim.isAnimating == false)
     }
 }

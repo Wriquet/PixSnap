@@ -1,6 +1,21 @@
 import Cocoa
 import CoreImage
+import QuartzCore
 import VisionKit
+
+/// Leak-free weak proxy so `CADisplayLink` never retains `OverlayView`.
+@MainActor
+private final class WeakDisplayLinkProxy: NSObject {
+    private let onTick: @MainActor (CADisplayLink) -> Void
+
+    init(onTick: @escaping @MainActor (CADisplayLink) -> Void) {
+        self.onTick = onTick
+    }
+
+    @objc func tick(_ link: CADisplayLink) {
+        onTick(link)
+    }
+}
 
 final class InlineTextField: NSTextField, NSTextFieldDelegate {
     var onCommit: (() -> Void)?
@@ -98,6 +113,7 @@ public final class OverlayView: NSView {
     internal private(set) var hoverCandidates: [DetectedWindow] = []
     internal private(set) var hoverCandidateIndex: Int = 0
     private var userManuallySteppedHierarchy: Bool = false
+    private var manualStepAnchorPoint: CGPoint = .zero
     private var lastHoverPoint: CGPoint = .zero
     private var dragCandidateWindow: DetectedWindow?
     private var isActiveHoverScreen: Bool
@@ -107,7 +123,15 @@ public final class OverlayView: NSView {
     private var visualIndexTask: Task<Void, Never>?
     private var axDebounceWorkItem: DispatchWorkItem?
     private var latestAXRequestID: Int = 0
+    private var lastAXElements: [DetectedWindow] = []
+    private var lastAXWindowID: CGWindowID = 0
     private var scrollAccumulator: CGFloat = 0
+    private var lastTrackpadStepTime: CFTimeInterval = 0
+
+    // Smooth VSync spring transition for hover highlight & multi-level switching
+    internal private(set) var hoverAnimator = HoverRectAnimator()
+    private var hoverDisplayLink: CADisplayLink?
+    private var lastHoverFrameTimestamp: CFTimeInterval = 0
 
     // Dragging & Resizing
     private var dragStartPoint: CGPoint = .zero
@@ -180,7 +204,7 @@ public final class OverlayView: NSView {
                 y: screenMouse.y - captured.screenFrame.origin.y
             )
             if bounds.contains(localMouse) {
-                updateHoverTarget(at: localMouse)
+                updateHoverTarget(at: localMouse, immediate: true)
                 updateMagnifier(at: localMouse)
             } else {
                 magnifier.isHidden = true
@@ -217,6 +241,15 @@ public final class OverlayView: NSView {
         }
     }
 
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            invalidateHoverDisplayLink()
+        } else if state == .hovering && isActiveHoverScreen && hoverAnimator.isAnimating {
+            ensureHoverDisplayLinkRunning()
+        }
+    }
+
     public func cleanup() {
         preAnalysisTask?.cancel()
         preAnalysisTask = nil
@@ -224,6 +257,10 @@ public final class OverlayView: NSView {
         visualIndexTask = nil
         axDebounceWorkItem?.cancel()
         axDebounceWorkItem = nil
+        invalidateHoverDisplayLink()
+        hoverAnimator.reset()
+        lastAXElements.removeAll()
+        lastAXWindowID = 0
         AXElementDetector.shared.resetSession()
         activeTextField?.removeFromSuperview()
         activeTextField = nil
@@ -235,6 +272,8 @@ public final class OverlayView: NSView {
         isActiveHoverScreen = false
         axDebounceWorkItem?.cancel()
         axDebounceWorkItem = nil
+        pauseHoverDisplayLink()
+        hoverAnimator.reset()
         hoverCandidates.removeAll()
         hoverCandidateIndex = 0
         hoveredWindow = nil
@@ -242,17 +281,84 @@ public final class OverlayView: NSView {
         needsDisplay = true
     }
 
+    // MARK: - Smooth Hover Rect Spring Animation (VSync CADisplayLink)
+
+    private func syncHoverAnimator(immediate: Bool) {
+        hoverAnimator.setTarget(hoveredWindow?.rect, immediate: immediate)
+        if hoverAnimator.isAnimating && window != nil && state == .hovering && isActiveHoverScreen {
+            ensureHoverDisplayLinkRunning()
+        } else if !hoverAnimator.isAnimating {
+            pauseHoverDisplayLink()
+        }
+    }
+
+    private func ensureHoverDisplayLinkRunning() {
+        guard window != nil else { return }
+        if hoverDisplayLink == nil {
+            let proxy = WeakDisplayLinkProxy { [weak self] link in
+                self?.handleHoverDisplayLinkTick(link)
+            }
+            let link = self.displayLink(target: proxy, selector: #selector(WeakDisplayLinkProxy.tick(_:)))
+            link.add(to: .main, forMode: .common)
+            hoverDisplayLink = link
+        }
+        if hoverDisplayLink?.isPaused == true {
+            lastHoverFrameTimestamp = 0
+            hoverDisplayLink?.isPaused = false
+        }
+    }
+
+    private func pauseHoverDisplayLink() {
+        hoverDisplayLink?.isPaused = true
+        lastHoverFrameTimestamp = 0
+    }
+
+    private func invalidateHoverDisplayLink() {
+        hoverDisplayLink?.invalidate()
+        hoverDisplayLink = nil
+        lastHoverFrameTimestamp = 0
+    }
+
+    private func handleHoverDisplayLinkTick(_ link: CADisplayLink) {
+        guard state == .hovering, isActiveHoverScreen else {
+            pauseHoverDisplayLink()
+            return
+        }
+        let now = link.timestamp
+        let dt: CFTimeInterval = (lastHoverFrameTimestamp > 0 && now > lastHoverFrameTimestamp)
+            ? (now - lastHoverFrameTimestamp)
+            : (1.0 / 60.0)
+        lastHoverFrameTimestamp = now
+
+        let keepGoing = hoverAnimator.step(dt: dt)
+        needsDisplay = true
+        if !keepGoing {
+            pauseHoverDisplayLink()
+        }
+    }
+
     // MARK: - 3-Layer Smart Hover Detection (Z-Order Windows + Visual Borders + AX Elements)
 
-    internal func updateHoverTarget(at loc: CGPoint) {
+    internal func updateHoverTarget(at loc: CGPoint, immediate: Bool = false) {
         lastHoverPoint = loc
+
+        // Guard against tiny finger/mouse jitter right after scrolling or arrow-stepping a hierarchy level
+        if !immediate && userManuallySteppedHierarchy {
+            if hypot(loc.x - manualStepAnchorPoint.x, loc.y - manualStepAnchorPoint.y) < 8.0 {
+                return
+            }
+            userManuallySteppedHierarchy = false
+        }
+
         scrollAccumulator = 0
-        userManuallySteppedHierarchy = false
 
         guard AppSettings.shared.enableWindowDetection else {
+            axDebounceWorkItem?.cancel()
+            axDebounceWorkItem = nil
             hoverCandidates.removeAll()
             hoverCandidateIndex = 0
             hoveredWindow = nil
+            syncHoverAnimator(immediate: immediate)
             return
         }
 
@@ -278,21 +384,46 @@ public final class OverlayView: NSView {
             }
         }
 
-        let immediate = WindowDetector.buildCandidateStack(
-            axCandidates: [],
+        // Layer 3 synchronous fast-path: use cached AX elements (0ms) or retain still-enclosing AX elements
+        // from the same window so moving across pixels never flashes back to Layer 1+2 during the 18ms debounce!
+        var immediateAX: [DetectedWindow] = []
+        var needsAsyncAX = false
+
+        if AppSettings.shared.enableSmartElementDetection,
+           AXElementDetector.isTrusted,
+           let frontWin = windowsAtPoint.first,
+           frontWin.pid > 0 {
+            if let cachedAX = AXElementDetector.shared.cachedElements(at: loc, pid: frontWin.pid) {
+                immediateAX = cachedAX
+                lastAXElements = cachedAX
+                lastAXWindowID = frontWin.windowID
+            } else {
+                needsAsyncAX = true
+                if lastAXWindowID == frontWin.windowID {
+                    immediateAX = lastAXElements.filter { $0.rect.contains(loc) }
+                } else {
+                    lastAXElements.removeAll()
+                    lastAXWindowID = frontWin.windowID
+                }
+            }
+        } else {
+            lastAXElements.removeAll()
+            lastAXWindowID = 0
+        }
+
+        let immediateStack = WindowDetector.buildCandidateStack(
+            axCandidates: immediateAX,
             visualCandidates: visualCandidates,
             windowsAtPoint: windowsAtPoint
         )
-        hoverCandidates = immediate
+        hoverCandidates = immediateStack
         hoverCandidateIndex = 0
         hoveredWindow = hoverCandidates.first
+        syncHoverAnimator(immediate: immediate)
 
-        // Layer 3: Non-blocking AXUIElement hierarchy query (when Accessibility permission is granted)
+        // Layer 3 async refinement (only on AX cache miss)
         axDebounceWorkItem?.cancel()
-        guard AppSettings.shared.enableSmartElementDetection,
-              AXElementDetector.isTrusted,
-              let frontWin = windowsAtPoint.first,
-              frontWin.pid > 0 else {
+        guard needsAsyncAX, let frontWin = windowsAtPoint.first else {
             return
         }
 
@@ -313,14 +444,18 @@ public final class OverlayView: NSView {
                 guard let self,
                       self.latestAXRequestID == reqID,
                       self.state == .hovering,
-                      self.isActiveHoverScreen,
-                      !axCandidates.isEmpty else { return }
+                      self.isActiveHoverScreen else { return }
+
+                self.lastAXElements = axCandidates
+                self.lastAXWindowID = frontWin.windowID
 
                 let merged = WindowDetector.buildCandidateStack(
                     axCandidates: axCandidates,
                     visualCandidates: visualSnapshot,
                     windowsAtPoint: windowsAtPoint
                 )
+                guard merged != self.hoverCandidates else { return }
+
                 self.hoverCandidates = merged
                 if !self.userManuallySteppedHierarchy {
                     self.hoverCandidateIndex = 0
@@ -328,6 +463,7 @@ public final class OverlayView: NSView {
                     self.hoverCandidateIndex = min(self.hoverCandidateIndex, max(0, merged.count - 1))
                 }
                 self.hoveredWindow = merged.isEmpty ? nil : merged[self.hoverCandidateIndex]
+                self.syncHoverAnimator(immediate: false)
                 self.needsDisplay = true
             }
         }
@@ -341,7 +477,9 @@ public final class OverlayView: NSView {
         guard next != hoverCandidateIndex else { return }
         hoverCandidateIndex = next
         userManuallySteppedHierarchy = true
+        manualStepAnchorPoint = lastHoverPoint
         hoveredWindow = hoverCandidates[next]
+        syncHoverAnimator(immediate: false)
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         needsDisplay = true
     }
@@ -657,19 +795,33 @@ public final class OverlayView: NSView {
             return
         }
 
+        // Ignore macOS trackpad inertia momentum tail so one flick never blasts through 4-5 layers uncontrollably
+        guard event.momentumPhase.isEmpty else { return }
+
+        if event.phase.contains(.began) || event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+            scrollAccumulator = 0
+        }
+
         let dy = event.scrollingDeltaY
         guard abs(dy) > 0.01 else { return }
 
         if event.hasPreciseScrollingDeltas {
-            // Smooth trackpad: accumulate so one gentle flick steps exactly 1 hierarchy level
+            // Smooth trackpad: deliberate detent threshold + brief pacing so each level transition glides cleanly
             scrollAccumulator += dy
-            let threshold: CGFloat = 14.0
+            let threshold: CGFloat = 26.0
+            let now = CACurrentMediaTime()
             if scrollAccumulator >= threshold {
                 scrollAccumulator = 0
-                stepHoverHierarchy(delta: 1) // expand outward: image -> card -> window -> behind window
+                if now - lastTrackpadStepTime >= 0.065 {
+                    lastTrackpadStepTime = now
+                    stepHoverHierarchy(delta: 1) // expand outward: image -> card -> window -> behind window
+                }
             } else if scrollAccumulator <= -threshold {
                 scrollAccumulator = 0
-                stepHoverHierarchy(delta: -1) // shrink inward
+                if now - lastTrackpadStepTime >= 0.065 {
+                    lastTrackpadStepTime = now
+                    stepHoverHierarchy(delta: -1) // shrink inward
+                }
             }
         } else {
             // Discrete mouse scroll wheel: 1 notch = 1 hierarchy level
@@ -803,6 +955,8 @@ public final class OverlayView: NSView {
             if dist > 4 {
                 axDebounceWorkItem?.cancel()
                 axDebounceWorkItem = nil
+                pauseHoverDisplayLink()
+                hoverAnimator.reset()
                 state = .selecting
                 hoveredWindow = nil
                 dragCandidateWindow = nil
@@ -961,6 +1115,8 @@ public final class OverlayView: NSView {
     private func enterSelectedState() {
         axDebounceWorkItem?.cancel()
         axDebounceWorkItem = nil
+        pauseHoverDisplayLink()
+        hoverAnimator.reset()
         state = .selected
         magnifier.isHidden = true
         onSelectionStarted?()
@@ -990,7 +1146,7 @@ public final class OverlayView: NSView {
         syncUndoRedoButtons()
         toolbar.isHidden = true
         toolbar.subBar.isHidden = true
-        updateHoverTarget(at: point)
+        updateHoverTarget(at: point, immediate: true)
         dragCandidateWindow = hoveredWindow
         updateMagnifier(at: point)
         NSCursor.crosshair.set()
@@ -1330,37 +1486,63 @@ public final class OverlayView: NSView {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
         // 1. Dimmed mask outside active cutout
-        let activeRect: CGRect
-        if state == .hovering, let hw = hoveredWindow, isActiveHoverScreen {
-            activeRect = hw.rect
-        } else {
-            activeRect = selectionRect
-        }
+        let isHoverVisual = (state == .hovering && isActiveHoverScreen)
+        let hoverRect = hoverAnimator.currentRect
+        let hoverAlpha = hoverAnimator.currentAlpha
 
-        ctx.saveGState()
-        ctx.setFillColor(NSColor(white: 0.0, alpha: 0.42).cgColor)
-        let maskPath = CGMutablePath()
-        maskPath.addRect(bounds)
-        if activeRect.width > 0 && activeRect.height > 0 {
-            maskPath.addPath(selectionCornerPath(for: activeRect))
-        }
-        ctx.addPath(maskPath)
-        ctx.fillPath(using: .evenOdd)
-        ctx.restoreGState()
-
-        // 2. Hovered window highlight
-        if state == .hovering, isActiveHoverScreen, let hw = hoveredWindow {
+        if isHoverVisual {
             ctx.saveGState()
-            let r = hw.rect.insetBy(dx: 1, dy: 1)
-            ctx.setStrokeColor(PixTheme.accent.cgColor)
+            if hoverRect.width > 0 && hoverRect.height > 0 && hoverAlpha > 0.01 {
+                if hoverAlpha < 0.99 {
+                    // Smooth fade-in / fade-out of the bright cutout hole
+                    ctx.setFillColor(NSColor(white: 0.0, alpha: 0.42 * (1.0 - hoverAlpha)).cgColor)
+                    ctx.fill(bounds)
+                }
+                ctx.setFillColor(NSColor(white: 0.0, alpha: 0.42 * hoverAlpha).cgColor)
+                let maskPath = CGMutablePath()
+                maskPath.addRect(bounds)
+                maskPath.addPath(selectionCornerPath(for: hoverRect))
+                ctx.addPath(maskPath)
+                ctx.fillPath(using: .evenOdd)
+            } else {
+                ctx.setFillColor(NSColor(white: 0.0, alpha: 0.42).cgColor)
+                ctx.fill(bounds)
+            }
+            ctx.restoreGState()
+        } else {
+            ctx.saveGState()
+            ctx.setFillColor(NSColor(white: 0.0, alpha: 0.42).cgColor)
+            let maskPath = CGMutablePath()
+            maskPath.addRect(bounds)
+            if selectionRect.width > 0 && selectionRect.height > 0 {
+                maskPath.addPath(selectionCornerPath(for: selectionRect))
+            }
+            ctx.addPath(maskPath)
+            ctx.fillPath(using: .evenOdd)
+            ctx.restoreGState()
+        }
+
+        // 2. Smoothly animated hover highlight border + gliding pill tag
+        if isHoverVisual && hoverRect.width > 0 && hoverRect.height > 0 && hoverAlpha > 0.01 {
+            ctx.saveGState()
+            let haloRect = hoverRect.insetBy(dx: 0.5, dy: 0.5)
+            ctx.setStrokeColor(PixTheme.accent.withAlphaComponent(0.22 * hoverAlpha).cgColor)
+            ctx.setLineWidth(5.0)
+            ctx.addPath(selectionCornerPath(for: haloRect))
+            ctx.strokePath()
+
+            let borderRect = hoverRect.insetBy(dx: 1.0, dy: 1.0)
+            ctx.setStrokeColor(PixTheme.accent.withAlphaComponent(hoverAlpha).cgColor)
             ctx.setLineWidth(2.0)
-            ctx.addPath(selectionCornerPath(for: r))
+            ctx.addPath(selectionCornerPath(for: borderRect))
             ctx.strokePath()
             ctx.restoreGState()
 
-            let levelSuffix = hoverCandidates.count > 1 ? "  ·  滚轮层级 \(hoverCandidateIndex + 1)/\(hoverCandidates.count)" : ""
-            let tag = "\(hw.hoverTagPrefix)  \(Int(round(hw.rect.width))) × \(Int(round(hw.rect.height)))\(levelSuffix)"
-            drawClampedPillTag(tag, preferredOrigin: CGPoint(x: hw.rect.minX + 8, y: hw.rect.maxY - 28))
+            if let hw = hoveredWindow {
+                let levelSuffix = hoverCandidates.count > 1 ? "  ·  滚轮层级 \(hoverCandidateIndex + 1)/\(hoverCandidates.count)" : ""
+                let tag = "\(hw.hoverTagPrefix)  \(Int(round(hw.rect.width))) × \(Int(round(hw.rect.height)))\(levelSuffix)"
+                drawClampedPillTag(tag, preferredOrigin: CGPoint(x: hoverRect.minX + 8, y: hoverRect.maxY - 28), alpha: hoverAlpha)
+            }
         }
 
         // 3. Annotations & selection chrome
@@ -1430,10 +1612,10 @@ public final class OverlayView: NSView {
         }
     }
 
-    private func drawClampedPillTag(_ text: String, preferredOrigin: CGPoint) {
+    private func drawClampedPillTag(_ text: String, preferredOrigin: CGPoint, alpha: CGFloat = 1.0) {
         let attr: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.white
+            .foregroundColor: NSColor.white.withAlphaComponent(alpha)
         ]
         let size = (text as NSString).size(withAttributes: attr)
         let pillW = ceil(size.width) + 20
@@ -1444,9 +1626,9 @@ public final class OverlayView: NSView {
         let pillRect = CGRect(x: clampedX, y: clampedY, width: pillW, height: pillH)
 
         let path = NSBezierPath(roundedRect: pillRect, xRadius: pillH / 2, yRadius: pillH / 2)
-        PixTheme.hudSolid.setFill()
+        PixTheme.hudSolid.withAlphaComponent(PixTheme.hudSolid.alphaComponent * alpha).setFill()
         path.fill()
-        PixTheme.hudBorder.setStroke()
+        PixTheme.hudBorder.withAlphaComponent(PixTheme.hudBorder.alphaComponent * alpha).setStroke()
         path.lineWidth = 1
         path.stroke()
 

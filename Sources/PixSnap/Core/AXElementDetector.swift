@@ -48,6 +48,21 @@ public final class AXElementDetector: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Synchronous cache lookup for a 6×6pt grid cell so moving inside an already-sampled
+    /// region never flashes back to Layer 1+2 while waiting for an async dispatch.
+    public func cachedElements(at localPoint: CGPoint, pid: pid_t) -> [DetectedWindow]? {
+        guard Self.isTrusted, pid > 0 else { return nil }
+        let key = CacheKey(
+            pid: pid,
+            gx: Int(floor(localPoint.x / 6.0)),
+            gy: Int(floor(localPoint.y / 6.0))
+        )
+        lock.lock()
+        let hit = cache[key]
+        lock.unlock()
+        return hit
+    }
+
     /// Asynchronously query nested AX elements enclosing `localPoint` inside `owningWindow`.
     /// Completion is invoked on the main actor.
     public func queryElements(
