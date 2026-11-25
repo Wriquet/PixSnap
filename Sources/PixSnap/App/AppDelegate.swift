@@ -341,7 +341,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         activePins.append(pin)
         syncStatusBarPinState()
 
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak pin] in
+            guard let pin, !pin.isClosed else { return }
             NSApp.activate(ignoringOtherApps: true)
             pin.makeKeyAndOrderFront(nil)
         }

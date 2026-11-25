@@ -158,4 +158,71 @@ struct PinHistoryDiskStoreTests {
         #expect(store.count == 1)
         #expect(store.recentFirst.first?.displayName == "from_dir2.png")
     }
+
+    @Test func restoredPinImageRetainsOpaquePixelsAfterManagedFileIsDeleted() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = PinHistoryStore(directoryURL: dir, maxCount: 10)
+        let redImg = try makeTestImage(width: 120, height: 80, color: NSColor(srgbRed: 0.95, green: 0.12, blue: 0.15, alpha: 1.0))
+        let rec = ClosedPinRecord(
+            image: redImg,
+            frame: NSRect(x: 100, y: 100, width: 60, height: 40),
+            baseSize: NSSize(width: 60, height: 40),
+            scale: 1.0,
+            alphaValue: 1.0
+        )
+        store.push(rec)
+        store.flushPendingWrites()
+
+        let storedURL = try #require(store.records.first?.fileURL)
+        #expect(FileManager.default.fileExists(atPath: storedURL.path))
+
+        // Popping loads the image and deletes the managed PNG asynchronously on ioQueue.
+        let popped = try #require(store.popLatest())
+        store.flushPendingWrites()
+        #expect(!FileManager.default.fileExists(atPath: storedURL.path))
+
+        // Even AFTER the backing PNG has been deleted from disk, drawing the restored NSImage
+        // MUST render opaque red pixels (never 0-alpha transparent!).
+        let loadedImg = try #require(store.loadImage(for: popped))
+        let cg = try #require(loadedImg.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let cs = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        var rgba = [UInt8](repeating: 0, count: 4 * 16 * 16)
+        let ctx = try #require(CGContext(
+            data: &rgba,
+            width: 16,
+            height: 16,
+            bitsPerComponent: 8,
+            bytesPerRow: 16 * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 16, height: 16))
+
+        let centerIdx = (8 * 16 + 8) * 4
+        #expect(rgba[centerIdx + 0] > 200)
+        #expect(rgba[centerIdx + 1] < 60)
+        #expect(rgba[centerIdx + 2] < 60)
+        #expect(rgba[centerIdx + 3] > 250)
+    }
+
+    @Test func pinWindowStaysVisibleOnDeactivateAndClosesOnCancelOperation() throws {
+        let img = try makeTestImage(width: 120, height: 80, color: .systemTeal)
+        let pin = PinWindow(image: img, origin: CGPoint(x: 100, y: 100))
+
+        #expect(pin.hidesOnDeactivate == false)
+        #expect(pin.isClosed == false)
+
+        var closedCount = 0
+        pin.onClosed = { _ in closedCount += 1 }
+
+        pin.cancelOperation(nil)
+        #expect(closedCount == 1)
+        #expect(pin.isClosed == true)
+
+        // Calling closePin again must remain idempotent
+        pin.closePin()
+        #expect(closedCount == 1)
+    }
 }

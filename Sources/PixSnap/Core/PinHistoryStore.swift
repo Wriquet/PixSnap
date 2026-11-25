@@ -117,20 +117,51 @@ public struct ClosedPinRecord {
     }
 
     public static func loadImageFromDisk(url: URL, logicalSize: NSSize?) -> NSImage? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-            return NSImage(contentsOf: url)
+        // Read bytes into memory first AND force immediate bitmap decode (`kCGImageSourceShouldCacheImmediately`)
+        // so the resulting CGImage is 100% self-contained in RAM and NEVER turns transparent if the PNG file
+        // is subsequently removed or modified on disk!
+        guard let data = try? Data(contentsOf: url), !data.isEmpty,
+              let src = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
         }
+        let decodeOpts: [CFString: Any] = [
+            kCGImageSourceShouldCache: true,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cgImage = CGImageSourceCreateImageAtIndex(src, 0, decodeOpts as CFDictionary),
+              cgImage.width > 0, cgImage.height > 0 else {
+            return nil
+        }
+
+        // Materialize an independent bitmap-backed CGImage via a fresh CGContext copy so CoreAnimation
+        // can never hold a lazy file/data provider reference after the source file is deleted.
+        let cs = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+        let finalCG: CGImage
+        if let ctx = CGContext(
+            data: nil,
+            width: cgImage.width,
+            height: cgImage.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) {
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+            finalCG = ctx.makeImage() ?? cgImage
+        } else {
+            finalCG = cgImage
+        }
+
         let targetSize: NSSize
         if let logical = logicalSize, logical.width > 0, logical.height > 0 {
             targetSize = logical
         } else {
             let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-            let w = CGFloat(cgImage.width) / scale
-            let h = CGFloat(cgImage.height) / scale
+            let w = CGFloat(finalCG.width) / scale
+            let h = CGFloat(finalCG.height) / scale
             targetSize = NSSize(width: max(1, round(w)), height: max(1, round(h)))
         }
-        return NSImage(cgImage: cgImage, size: targetSize)
+        return NSImage(cgImage: finalCG, size: targetSize)
     }
 
     private static func makeSubsampledThumbnail(from url: URL, maxSize: NSSize) -> NSImage? {
@@ -389,13 +420,19 @@ public final class PinHistoryStore {
             if !rec.isManagedByPixSnap, let path = rec.fileURL?.path, poppedExternalPaths.contains(path) {
                 continue
             }
-            return consumeRecord(at: idx)
+            if let consumed = consumeRecord(at: idx) {
+                return consumed
+            }
         }
 
         // If every remaining record was an already-cycled external image, reset cycle and pop newest
         if !poppedExternalPaths.isEmpty && !records.isEmpty {
             poppedExternalPaths.removeAll()
-            return consumeRecord(at: records.count - 1)
+            for idx in stride(from: records.count - 1, through: 0, by: -1) {
+                if let consumed = consumeRecord(at: idx) {
+                    return consumed
+                }
+            }
         }
         return nil
     }
@@ -511,14 +548,13 @@ public final class PinHistoryStore {
 
     // MARK: - Private Helpers
 
-    private func consumeRecord(at idx: Int) -> ClosedPinRecord {
+    private func consumeRecord(at idx: Int) -> ClosedPinRecord? {
         let record = records[idx]
         if record.isManagedByPixSnap {
             records.remove(at: idx)
             managedMetadata.removeValue(forKey: record.id)
             thumbnailCache.removeValue(forKey: record.id)
-            // Keep file on disk long enough for caller's `loadImage(for:)` — wait: caller needs the file!
-            // Load synchronously into a transient record before scheduling managed file removal!
+            // Materialize the bitmap completely into RAM BEFORE scheduling managed file deletion
             let loadedImg = loadImage(for: record)
             if let fileURL = record.fileURL {
                 ioQueue.async {
@@ -526,18 +562,16 @@ public final class PinHistoryStore {
                 }
             }
             persistIndexAsync()
-            if let loadedImg {
-                return ClosedPinRecord(
-                    id: record.id,
-                    image: loadedImg,
-                    frame: record.frame,
-                    baseSize: record.baseSize,
-                    scale: record.scale,
-                    alphaValue: record.alphaValue,
-                    closedAt: record.closedAt
-                )
-            }
-            return record
+            guard let loadedImg else { return nil }
+            return ClosedPinRecord(
+                id: record.id,
+                image: loadedImg,
+                frame: record.frame,
+                baseSize: record.baseSize,
+                scale: record.scale,
+                alphaValue: record.alphaValue,
+                closedAt: record.closedAt
+            )
         } else {
             // External user image: NEVER delete the file on disk! Just mark cycled for `popLatest()`.
             if let path = record.fileURL?.path {

@@ -249,6 +249,7 @@ public final class PinWindow: NSPanel {
     private var activeGestureAnchor: (norm: CGPoint, screenAnchor: CGPoint)?
     private var gestureResetWorkItem: DispatchWorkItem?
     private var didCloseNotify: Bool = false
+    public var isClosed: Bool { didCloseNotify }
 
     public init(
         image: NSImage,
@@ -279,6 +280,7 @@ public final class PinWindow: NSPanel {
         self.backgroundColor = .clear
         self.hasShadow = true
         self.alphaValue = restoredAlpha
+        self.hidesOnDeactivate = false
         self.isMovableByWindowBackground = false
         self.acceptsMouseMovedEvents = true
         self.contentView = contentViewWrapper
@@ -393,12 +395,12 @@ public final class PinWindow: NSPanel {
     private func startLiveTextAnalysis() {
         let img = self.currentImage
         Task { @MainActor [weak self] in
-            guard let self else { return }
             let analyzer = ImageAnalyzer()
             var config = ImageAnalyzer.Configuration([.text])
             config.locales = ["zh-Hans", "zh-Hant", "en-US"]
             do {
                 let analysis = try await analyzer.analyze(img, orientation: .up, configuration: config)
+                guard let self, !self.didCloseNotify else { return }
                 self.fullRecognizedText = analysis.transcript
                 self.contentViewWrapper.overlay.analysis = analysis
             } catch {
@@ -902,11 +904,26 @@ public final class PinWindow: NSPanel {
         onRestorePreviousPinRequested?()
     }
 
+    public override func cancelOperation(_ sender: Any?) {
+        closePin()
+    }
+
     @objc public func closePin() {
         guard !didCloseNotify else { return }
         didCloseNotify = true
+        gestureResetWorkItem?.cancel()
+        gestureResetWorkItem = nil
         self.orderOut(nil)
         self.close()
         onClosed?(self)
+        // Release overlay / menu / callbacks cleanly so closed PinWindows deallocate immediately
+        contentViewWrapper.overlay.analysis = nil
+        contentViewWrapper.overlay.trackingImageView = nil
+        contentViewWrapper.overlay.delegate = nil
+        contentViewWrapper.menu = nil
+        onClosed = nil
+        onClickThroughChanged = nil
+        onAppearanceChanged = nil
+        onRestorePreviousPinRequested = nil
     }
 }
