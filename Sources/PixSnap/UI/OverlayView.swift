@@ -17,38 +17,60 @@ private final class WeakDisplayLinkProxy: NSObject {
     }
 }
 
-final class InlineTextField: NSTextField, NSTextFieldDelegate {
+/// Scroll-free transparent `NSTextView` for inline canvas text annotation.
+/// Using `NSTextView` directly (with NO `NSClipView` / horizontal scrolling) eliminates both the
+/// macOS AppKit field-editor gray backdrop AND the Chinese Pinyin preedit left-scrolling bug,
+/// while updating bounds live on every `setMarkedText` IME keystroke.
+final class InlineTextField: NSTextView {
     var onCommit: (() -> Void)?
     var onCancel: (() -> Void)?
+
+    var stringValue: String { string }
+    var placeholderString: String? { nil }
 
     private var maxBounds: CGRect
     private let dashedBorder = CAShapeLayer()
 
     init(origin: CGPoint, color: NSColor, fontSize: CGFloat, maxBounds: CGRect) {
         self.maxBounds = maxBounds
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
-        let lineH = Self.measuredLineHeight(for: font)
+        let initFont = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let lineH = Self.measuredLineHeight(for: initFont)
         let initW: CGFloat = max(18, ceil(fontSize * 0.95))
         let initH: CGFloat = lineH + 2
 
         let clampedX = min(max(maxBounds.minX + 2, origin.x), max(maxBounds.minX + 2, maxBounds.maxX - initW - 2))
         let clampedY = min(max(maxBounds.minY + 2, origin.y - initH / 2), max(maxBounds.minY + 2, maxBounds.maxY - initH - 2))
 
-        super.init(frame: NSRect(x: clampedX, y: clampedY, width: initW, height: initH))
+        let storage = NSTextStorage()
+        let layoutMgr = NSLayoutManager()
+        storage.addLayoutManager(layoutMgr)
+        let maxAvailW = max(24, maxBounds.maxX - clampedX - 2)
+        let container = NSTextContainer(size: NSSize(width: max(20, maxAvailW - 4), height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 2
+        container.widthTracksTextView = false
+        container.heightTracksTextView = false
+        layoutMgr.addTextContainer(container)
 
-        self.delegate = self
-        self.isBordered = false
-        self.isBezeled = false
+        super.init(frame: NSRect(x: clampedX, y: clampedY, width: initW, height: initH), textContainer: container)
+
+        self.isEditable = true
+        self.isSelectable = true
+        self.isRichText = false
+        self.importsGraphics = false
+        self.allowsUndo = true
         self.drawsBackground = false
         self.backgroundColor = .clear
-        self.textColor = color
-        self.font = font
+        self.isHorizontallyResizable = false
+        self.isVerticallyResizable = false
+        self.textContainerInset = NSSize(width: 2, height: 1)
         self.focusRingType = .none
-        self.placeholderString = nil
-        self.usesSingleLineMode = false
-        self.lineBreakMode = .byWordWrapping
-        self.cell?.wraps = false
-        self.cell?.isScrollable = true
+        self.font = initFont
+        self.textColor = color
+        self.insertionPointColor = color
+        self.typingAttributes = [
+            .font: initFont,
+            .foregroundColor: color
+        ]
 
         self.wantsLayer = true
         self.layer?.backgroundColor = NSColor.clear.cgColor
@@ -62,40 +84,65 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
         updateDashedBorderPath()
     }
 
-    private static func measuredLineHeight(for font: NSFont) -> CGFloat {
-        ceil(("中Ag" as NSString).size(withAttributes: [.font: font]).height)
-    }
-
     required init?(coder: NSCoder) { fatalError() }
 
     override var isOpaque: Bool { false }
+
+    private static func measuredLineHeight(for font: NSFont) -> CGFloat {
+        ceil(("中Ag" as NSString).size(withAttributes: [.font: font]).height)
+    }
 
     override func layout() {
         super.layout()
         updateDashedBorderPath()
     }
 
-    override func becomeFirstResponder() -> Bool {
-        let ok = super.becomeFirstResponder()
-        if ok {
-            configureActiveEditor()
-        }
-        return ok
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        resizeToFitContent()
     }
 
-    override func textDidBeginEditing(_ notification: Notification) {
-        super.textDidBeginEditing(notification)
-        configureActiveEditor()
+    override func unmarkText() {
+        super.unmarkText()
+        resizeToFitContent()
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        resizeToFitContent()
+    }
+
+    override func doCommand(by commandSelector: Selector) {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if hasMarkedText() {
+                super.doCommand(by: commandSelector)
+                resizeToFitContent()
+                return
+            }
+            if let event = NSApp.currentEvent, event.modifierFlags.contains(.shift) {
+                insertNewlineIgnoringFieldEditor(nil)
+                resizeToFitContent()
+                return
+            }
+            onCommit?()
+            return
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            if hasMarkedText() {
+                super.doCommand(by: commandSelector)
+                resizeToFitContent()
+                return
+            }
+            onCancel?()
+            return
+        }
+        super.doCommand(by: commandSelector)
     }
 
     func configureActiveEditor() {
-        guard let editor = currentEditor() as? NSTextView else { return }
-        editor.drawsBackground = false
-        editor.backgroundColor = .clear
-        editor.insertionPointColor = textColor ?? PixTheme.accent
-        editor.isRichText = false
-        editor.enclosingScrollView?.drawsBackground = false
-        editor.enclosingScrollView?.backgroundColor = .clear
+        drawsBackground = false
+        backgroundColor = .clear
+        insertionPointColor = textColor ?? PixTheme.accent
     }
 
     private func updateDashedBorderPath() {
@@ -105,61 +152,55 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
     }
 
     func updateStyle(color: NSColor, fontSize: CGFloat) {
+        let nextFont = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
         self.textColor = color
-        self.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        self.font = nextFont
+        self.insertionPointColor = color
+        self.typingAttributes = [
+            .font: nextFont,
+            .foregroundColor: color
+        ]
+        if let storage = textStorage, storage.length > 0 {
+            storage.addAttributes([.font: nextFont, .foregroundColor: color], range: NSRange(location: 0, length: storage.length))
+        }
         dashedBorder.strokeColor = color.withAlphaComponent(0.55).cgColor
-        configureActiveEditor()
         resizeToFitContent()
     }
 
     func resizeToFitContent() {
         let currentFont = font ?? NSFont.systemFont(ofSize: 19, weight: .semibold)
-        let text = (currentEditor() as? NSTextView)?.string ?? stringValue
         let minW = max(18, ceil(currentFont.pointSize * 0.95))
         let lineH = Self.measuredLineHeight(for: currentFont)
-        let maxAvailW = max(minW, maxBounds.maxX - frame.minX - 4)
+        let maxAvailW = max(minW, maxBounds.maxX - frame.minX - 2)
+
+        if let container = textContainer {
+            container.containerSize = NSSize(
+                width: max(16, maxAvailW - textContainerInset.width * 2),
+                height: .greatestFiniteMagnitude
+            )
+        }
 
         let newW: CGFloat
         let newH: CGFloat
-        if text.isEmpty {
+        if string.isEmpty {
+            newW = minW
+            newH = lineH + textContainerInset.height * 2
+        } else if let lm = layoutManager, let tc = textContainer {
+            lm.ensureLayout(for: tc)
+            let used = lm.usedRect(for: tc)
+            let padW = textContainerInset.width * 2 + 4
+            let padH = textContainerInset.height * 2
+            newW = min(maxAvailW, max(minW, ceil(used.width) + padW))
+            newH = max(lineH + padH, ceil(used.height) + padH)
+        } else {
             newW = minW
             newH = lineH + 2
-        } else {
-            let lines = text.components(separatedBy: "\n")
-            var widest: CGFloat = 0
-            for line in lines {
-                let measured = ((line.isEmpty ? " " : line) as NSString).size(withAttributes: [.font: currentFont])
-                widest = max(widest, measured.width)
-            }
-            newW = min(maxAvailW, max(minW, ceil(widest) + 8))
-            newH = CGFloat(max(1, lines.count)) * lineH + 2
         }
 
         // Keep top-left anchored visually while growing
         let topY = frame.maxY
         frame = NSRect(x: frame.minX, y: max(maxBounds.minY + 2, topY - newH), width: newW, height: newH)
         updateDashedBorderPath()
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        resizeToFitContent()
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            if let event = NSApp.currentEvent, event.modifierFlags.contains(.shift) {
-                textView.insertNewlineIgnoringFieldEditor(nil)
-                resizeToFitContent()
-                return true
-            }
-            onCommit?()
-            return true
-        }
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            onCancel?()
-            return true
-        }
-        return false
     }
 }
 
@@ -1362,7 +1403,7 @@ public final class OverlayView: NSView {
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let fontSize = field.font?.pointSize ?? toolbar.activeSize.fontSize
         let color = field.textColor ?? toolbar.activeColor
-        let textOrigin = CGPoint(x: field.frame.minX + 2, y: field.frame.minY + 1)
+        let textOrigin = CGPoint(x: field.frame.minX + 4, y: field.frame.minY + 1)
 
         field.removeFromSuperview()
         activeTextField = nil

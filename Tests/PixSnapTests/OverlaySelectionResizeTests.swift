@@ -195,9 +195,22 @@ struct OverlaySelectionResizeTests {
         #expect(field.isOpaque == false)
         #expect((field.layer?.backgroundColor?.alpha ?? 0) == 0)
         #expect(field.placeholderString == nil)
+        #expect(field.enclosingScrollView == nil) // No NSClipView -> text can never scroll left during Pinyin IME!
         #expect(field.frame.width <= 32)
         let font = try #require(field.font)
         let lineH = ceil(("中Ag" as NSString).size(withAttributes: [.font: font]).height)
         #expect(field.frame.height <= lineH + 3) // Snug to font height with no excess bottom gap
+
+        // Simulate Chinese Pinyin IME preedit (marked text) -> frame expands live without shifting minX left!
+        let originX = field.frame.minX
+        let initialWidth = field.frame.width
+        field.setMarkedText("nihaoshijie", selectedRange: NSRange(location: 11, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(field.frame.minX == originX)
+        #expect(field.frame.width > initialWidth + 40)
+
+        // Commit Chinese characters -> stays anchored at originX and fits snugly
+        field.insertText("你好世界", replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(field.frame.minX == originX)
+        #expect(field.stringValue == "你好世界")
     }
 }
