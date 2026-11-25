@@ -94,9 +94,20 @@ public final class OverlayView: NSView {
 
     public private(set) var state: SelectionState = .hovering
     public var selectionRect: CGRect = .zero
-    private var hoveredWindow: DetectedWindow?
+    internal private(set) var hoveredWindow: DetectedWindow?
+    internal private(set) var hoverCandidates: [DetectedWindow] = []
+    internal private(set) var hoverCandidateIndex: Int = 0
+    private var userManuallySteppedHierarchy: Bool = false
+    private var lastHoverPoint: CGPoint = .zero
     private var dragCandidateWindow: DetectedWindow?
     private var isActiveHoverScreen: Bool
+
+    // Layer 2 (Visual Border) & Layer 3 (AX Hierarchy) smart element detection
+    internal var visualDetector: VisualRegionDetector?
+    private var visualIndexTask: Task<Void, Never>?
+    private var axDebounceWorkItem: DispatchWorkItem?
+    private var latestAXRequestID: Int = 0
+    private var scrollAccumulator: CGFloat = 0
 
     // Dragging & Resizing
     private var dragStartPoint: CGPoint = .zero
@@ -160,6 +171,7 @@ public final class OverlayView: NSView {
         super.init(frame: frameRect)
 
         setupSubviews()
+        startVisualIndexIfNeeded()
 
         if isInitialActiveScreen {
             let screenMouse = NSEvent.mouseLocation
@@ -168,9 +180,7 @@ public final class OverlayView: NSView {
                 y: screenMouse.y - captured.screenFrame.origin.y
             )
             if bounds.contains(localMouse) {
-                if AppSettings.shared.enableWindowDetection {
-                    self.hoveredWindow = WindowDetector.shared.findWindow(at: localMouse, in: detectedWindows)
-                }
+                updateHoverTarget(at: localMouse)
                 updateMagnifier(at: localMouse)
             } else {
                 magnifier.isHidden = true
@@ -190,9 +200,31 @@ public final class OverlayView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    private func startVisualIndexIfNeeded() {
+        guard AppSettings.shared.enableWindowDetection && AppSettings.shared.enableSmartElementDetection else { return }
+        let cgImg = capturedScreen.image
+        let logicalSize = bounds.size
+        visualIndexTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let detector = VisualRegionDetector(cgImage: cgImg, logicalSize: logicalSize)
+            await MainActor.run { [weak self] in
+                guard let self, let detector else { return }
+                self.visualDetector = detector
+                if self.state == .hovering && self.isActiveHoverScreen && self.bounds.contains(self.lastHoverPoint) {
+                    self.updateHoverTarget(at: self.lastHoverPoint)
+                    self.needsDisplay = true
+                }
+            }
+        }
+    }
+
     public func cleanup() {
         preAnalysisTask?.cancel()
         preAnalysisTask = nil
+        visualIndexTask?.cancel()
+        visualIndexTask = nil
+        axDebounceWorkItem?.cancel()
+        axDebounceWorkItem = nil
+        AXElementDetector.shared.resetSession()
         activeTextField?.removeFromSuperview()
         activeTextField = nil
         NSCursor.arrow.set()
@@ -201,8 +233,116 @@ public final class OverlayView: NSView {
     public func deactivateHoverFromSiblingScreen() {
         guard state == .hovering else { return }
         isActiveHoverScreen = false
+        axDebounceWorkItem?.cancel()
+        axDebounceWorkItem = nil
+        hoverCandidates.removeAll()
+        hoverCandidateIndex = 0
         hoveredWindow = nil
         magnifier.isHidden = true
+        needsDisplay = true
+    }
+
+    // MARK: - 3-Layer Smart Hover Detection (Z-Order Windows + Visual Borders + AX Elements)
+
+    internal func updateHoverTarget(at loc: CGPoint) {
+        lastHoverPoint = loc
+        scrollAccumulator = 0
+        userManuallySteppedHierarchy = false
+
+        guard AppSettings.shared.enableWindowDetection else {
+            hoverCandidates.removeAll()
+            hoverCandidateIndex = 0
+            hoveredWindow = nil
+            return
+        }
+
+        // Layer 1: Z-order stacked windows at cursor
+        let windowsAtPoint = WindowDetector.shared.findAllWindows(at: loc, in: detectedWindows)
+
+        // Layer 2: Instant visual border / image region detection inside the frontmost window
+        var visualCandidates: [DetectedWindow] = []
+        if AppSettings.shared.enableSmartElementDetection,
+           let frontWin = windowsAtPoint.first,
+           let visual = visualDetector {
+            let rects = visual.detectRegions(at: loc, within: frontWin.rect)
+            visualCandidates = rects.map { r in
+                DetectedWindow(
+                    rect: r,
+                    title: frontWin.title,
+                    appName: frontWin.appName,
+                    pid: frontWin.pid,
+                    windowID: frontWin.windowID,
+                    windowLayer: frontWin.windowLayer,
+                    elementRoleLabel: "识别区域"
+                )
+            }
+        }
+
+        let immediate = WindowDetector.buildCandidateStack(
+            axCandidates: [],
+            visualCandidates: visualCandidates,
+            windowsAtPoint: windowsAtPoint
+        )
+        hoverCandidates = immediate
+        hoverCandidateIndex = 0
+        hoveredWindow = hoverCandidates.first
+
+        // Layer 3: Non-blocking AXUIElement hierarchy query (when Accessibility permission is granted)
+        axDebounceWorkItem?.cancel()
+        guard AppSettings.shared.enableSmartElementDetection,
+              AXElementDetector.isTrusted,
+              let frontWin = windowsAtPoint.first,
+              frontWin.pid > 0 else {
+            return
+        }
+
+        let visualSnapshot = visualCandidates
+        latestAXRequestID += 1
+        let reqID = latestAXRequestID
+        let screenFrame = capturedScreen.screenFrame
+        let primaryHeight = capturedScreen.primaryScreenHeight
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .hovering, self.isActiveHoverScreen else { return }
+            AXElementDetector.shared.queryElements(
+                at: loc,
+                owningWindow: frontWin,
+                screenFrame: screenFrame,
+                primaryScreenHeight: primaryHeight
+            ) { [weak self] axCandidates in
+                guard let self,
+                      self.latestAXRequestID == reqID,
+                      self.state == .hovering,
+                      self.isActiveHoverScreen,
+                      !axCandidates.isEmpty else { return }
+
+                let merged = WindowDetector.buildCandidateStack(
+                    axCandidates: axCandidates,
+                    visualCandidates: visualSnapshot,
+                    windowsAtPoint: windowsAtPoint
+                )
+                self.hoverCandidates = merged
+                if !self.userManuallySteppedHierarchy {
+                    self.hoverCandidateIndex = 0
+                } else {
+                    self.hoverCandidateIndex = min(self.hoverCandidateIndex, max(0, merged.count - 1))
+                }
+                self.hoveredWindow = merged.isEmpty ? nil : merged[self.hoverCandidateIndex]
+                self.needsDisplay = true
+            }
+        }
+        axDebounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.018, execute: work)
+    }
+
+    private func stepHoverHierarchy(delta: Int) {
+        guard state == .hovering, isActiveHoverScreen, hoverCandidates.count > 1 else { return }
+        let next = max(0, min(hoverCandidates.count - 1, hoverCandidateIndex + delta))
+        guard next != hoverCandidateIndex else { return }
+        hoverCandidateIndex = next
+        userManuallySteppedHierarchy = true
+        hoveredWindow = hoverCandidates[next]
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         needsDisplay = true
     }
 
@@ -487,11 +627,7 @@ public final class OverlayView: NSView {
                 window?.makeFirstResponder(self)
                 onBecameActiveScreen?()
             }
-            if AppSettings.shared.enableWindowDetection {
-                hoveredWindow = WindowDetector.shared.findWindow(at: loc, in: detectedWindows)
-            } else {
-                hoveredWindow = nil
-            }
+            updateHoverTarget(at: loc)
             NSCursor.crosshair.set()
             updateMagnifier(at: loc)
             needsDisplay = true
@@ -512,6 +648,32 @@ public final class OverlayView: NSView {
 
         case .selecting:
             NSCursor.crosshair.set()
+        }
+    }
+
+    public override func scrollWheel(with event: NSEvent) {
+        guard state == .hovering, isActiveHoverScreen, hoverCandidates.count > 1 else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        let dy = event.scrollingDeltaY
+        guard abs(dy) > 0.01 else { return }
+
+        if event.hasPreciseScrollingDeltas {
+            // Smooth trackpad: accumulate so one gentle flick steps exactly 1 hierarchy level
+            scrollAccumulator += dy
+            let threshold: CGFloat = 14.0
+            if scrollAccumulator >= threshold {
+                scrollAccumulator = 0
+                stepHoverHierarchy(delta: 1) // expand outward: image -> card -> window -> behind window
+            } else if scrollAccumulator <= -threshold {
+                scrollAccumulator = 0
+                stepHoverHierarchy(delta: -1) // shrink inward
+            }
+        } else {
+            // Discrete mouse scroll wheel: 1 notch = 1 hierarchy level
+            stepHoverHierarchy(delta: dy > 0 ? 1 : -1)
         }
     }
 
@@ -639,6 +801,8 @@ public final class OverlayView: NSView {
         switch state {
         case .hovering:
             if dist > 4 {
+                axDebounceWorkItem?.cancel()
+                axDebounceWorkItem = nil
                 state = .selecting
                 hoveredWindow = nil
                 dragCandidateWindow = nil
@@ -795,6 +959,8 @@ public final class OverlayView: NSView {
     }
 
     private func enterSelectedState() {
+        axDebounceWorkItem?.cancel()
+        axDebounceWorkItem = nil
         state = .selected
         magnifier.isHidden = true
         onSelectionStarted?()
@@ -824,10 +990,8 @@ public final class OverlayView: NSView {
         syncUndoRedoButtons()
         toolbar.isHidden = true
         toolbar.subBar.isHidden = true
-        if AppSettings.shared.enableWindowDetection {
-            hoveredWindow = WindowDetector.shared.findWindow(at: point, in: detectedWindows)
-            dragCandidateWindow = hoveredWindow
-        }
+        updateHoverTarget(at: point)
+        dragCandidateWindow = hoveredWindow
         updateMagnifier(at: point)
         NSCursor.crosshair.set()
         needsDisplay = true
@@ -1103,6 +1267,17 @@ public final class OverlayView: NSView {
             return
         }
 
+        // Up/Down arrows while hovering -> step through detected element / window hierarchy
+        if state == .hovering && mods.isEmpty && hoverCandidates.count > 1 {
+            if event.keyCode == 126 { // Up -> parent / outer level
+                stepHoverHierarchy(delta: 1)
+                return
+            } else if event.keyCode == 125 { // Down -> child / inner level
+                stepHoverHierarchy(delta: -1)
+                return
+            }
+        }
+
         // Arrow keys -> nudge selection (or resize with Option) ONLY when selected
         if state == .selected {
             let step: CGFloat = mods.contains(.shift) ? 10 : 1
@@ -1183,7 +1358,8 @@ public final class OverlayView: NSView {
             ctx.strokePath()
             ctx.restoreGState()
 
-            let tag = "\(hw.appName)  \(Int(round(hw.rect.width))) × \(Int(round(hw.rect.height)))"
+            let levelSuffix = hoverCandidates.count > 1 ? "  ·  滚轮层级 \(hoverCandidateIndex + 1)/\(hoverCandidates.count)" : ""
+            let tag = "\(hw.hoverTagPrefix)  \(Int(round(hw.rect.width))) × \(Int(round(hw.rect.height)))\(levelSuffix)"
             drawClampedPillTag(tag, preferredOrigin: CGPoint(x: hw.rect.minX + 8, y: hw.rect.maxY - 28))
         }
 

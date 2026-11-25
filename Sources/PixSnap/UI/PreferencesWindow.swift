@@ -888,6 +888,9 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
     // Capture & Pin controls
     private let magnifierSwitch = NSSwitch()
     private let windowDetectSwitch = NSSwitch()
+    private let smartElementSwitch = NSSwitch()
+    private let smartElementSubtitle = NSTextField(labelWithString: "")
+    private var axAuthButton: NSButton?
     private let colorFormatPopup = NSPopUpButton()
     private let pinAnchorPopup = NSPopUpButton()
     private let pinBorderSwitch = NSSwitch()
@@ -942,6 +945,10 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
         stopAllShortcutRecording(resumeHotKeys: true)
     }
 
+    public func windowDidBecomeKey(_ notification: Notification) {
+        refreshAccessibilityStatus()
+    }
+
     private func stopAllShortcutRecording(except active: ShortcutRecordButton? = nil, resumeHotKeys: Bool = true) {
         for btn in recorderButtons.values where btn !== active && btn.isRecording {
             btn.stopRecording(resumeHotKeys: resumeHotKeys)
@@ -989,6 +996,9 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
 
         magnifierSwitch.state = s.showMagnifier ? .on : .off
         windowDetectSwitch.state = s.enableWindowDetection ? .on : .off
+        smartElementSwitch.state = s.enableSmartElementDetection ? .on : .off
+        smartElementSwitch.isEnabled = s.enableWindowDetection
+        refreshAccessibilityStatus()
         colorFormatPopup.selectItem(at: ColorCopyFormat.allCases.firstIndex(of: s.colorCopyFormat) ?? 0)
         pinAnchorPopup.selectItem(at: PinZoomAnchorMode.allCases.firstIndex(of: s.pinZoomAnchorMode) ?? 0)
         pinBorderSwitch.state = s.pinShowBorder ? .on : .off
@@ -1221,6 +1231,8 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
         magnifierSwitch.action = #selector(magnifierToggled)
         windowDetectSwitch.target = self
         windowDetectSwitch.action = #selector(windowDetectToggled)
+        smartElementSwitch.target = self
+        smartElementSwitch.action = #selector(smartElementToggled)
 
         for fmt in ColorCopyFormat.allCases {
             colorFormatPopup.addItem(withTitle: fmt.displayName)
@@ -1231,7 +1243,8 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
 
         let captureCard = SettingsCardView(rows: [
             makeSwitchRow(title: "悬停显示 15×15 像素放大镜与取色器", subtitle: nil, toggle: magnifierSwitch),
-            makeSwitchRow(title: "自动探测前台应用窗口边界吸附", subtitle: nil, toggle: windowDetectSwitch),
+            makeSwitchRow(title: "自动探测窗口边界吸附（支持多窗口层级）", subtitle: nil, toggle: windowDetectSwitch),
+            makeSmartElementRow(),
             makeControlRow(title: "默认取色格式 (C 复制 / Tab 切换)", control: colorFormatPopup),
             makeGlassOpacityRow()
         ])
@@ -1416,6 +1429,51 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
         return row
     }
 
+    private func makeSmartElementRow() -> NSView {
+        smartElementSwitch.controlSize = .small
+        let row = makeRowContainer()
+
+        let left = NSStackView()
+        left.orientation = .vertical
+        left.alignment = .leading
+        left.spacing = 2
+        let title = NSTextField(labelWithString: "智能识别图片与窗口内元素")
+        title.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        smartElementSubtitle.font = NSFont.systemFont(ofSize: 11)
+        smartElementSubtitle.textColor = .secondaryLabelColor
+        smartElementSubtitle.lineBreakMode = .byTruncatingTail
+        smartElementSubtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        left.addArrangedSubview(title)
+        left.addArrangedSubview(smartElementSubtitle)
+
+        let authBtn = makeGlassButton(
+            title: "授权辅助功能",
+            symbol: "hand.raised",
+            controlSize: .small,
+            target: self,
+            action: #selector(requestAccessibilityPermission)
+        )
+        self.axAuthButton = authBtn
+
+        row.addArrangedSubview(left)
+        row.addArrangedSubview(makeSpacer())
+        row.addArrangedSubview(authBtn)
+        row.addArrangedSubview(smartElementSwitch)
+
+        refreshAccessibilityStatus()
+        return row
+    }
+
+    private func refreshAccessibilityStatus() {
+        let trusted = AXElementDetector.isTrusted
+        axAuthButton?.isHidden = trusted
+        if trusted {
+            smartElementSubtitle.stringValue = "视觉边缘 + 辅助功能已就绪，悬停滚动滚轮可切换层级"
+        } else {
+            smartElementSubtitle.stringValue = "视觉识别图片已就绪；授权后可识别网页/应用内控件"
+        }
+    }
+
     private func makeGlassOpacityRow() -> NSView {
         let col = NSStackView()
         col.orientation = .vertical
@@ -1573,7 +1631,24 @@ public final class PreferencesWindow: NSWindow, NSWindowDelegate {
     }
 
     @objc private func windowDetectToggled() {
-        AppSettings.shared.enableWindowDetection = (windowDetectSwitch.state == .on)
+        let enabled = (windowDetectSwitch.state == .on)
+        AppSettings.shared.enableWindowDetection = enabled
+        smartElementSwitch.isEnabled = enabled
+    }
+
+    @objc private func smartElementToggled() {
+        AppSettings.shared.enableSmartElementDetection = (smartElementSwitch.state == .on)
+    }
+
+    @objc private func requestAccessibilityPermission() {
+        AXElementDetector.requestPermissionPrompt()
+        AXElementDetector.openAccessibilitySettings()
+        ToastHUD.shared.show(
+            "请在「辅助功能」中勾选 PixSnap，勾选后即刻生效",
+            symbolName: "hand.raised.fill",
+            accentColor: .systemBlue,
+            duration: 2.8
+        )
     }
 
     @objc private func colorFormatChanged() {

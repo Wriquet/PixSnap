@@ -12,6 +12,8 @@ public final class ScreenCaptureManager: @unchecked Sendable {
         public let pixelSize: CGSize
         public let scaleFactor: CGFloat
         public let windows: [DetectedWindow]
+        /// Primary monitor height in Cocoa points (used for CG <-> Cocoa top-left conversion in AX queries)
+        public let primaryScreenHeight: CGFloat
 
         public init(
             displayID: CGDirectDisplayID,
@@ -19,7 +21,8 @@ public final class ScreenCaptureManager: @unchecked Sendable {
             screenFrame: CGRect,
             pixelSize: CGSize,
             scaleFactor: CGFloat,
-            windows: [DetectedWindow] = []
+            windows: [DetectedWindow] = [],
+            primaryScreenHeight: CGFloat = 1080
         ) {
             self.displayID = displayID
             self.image = image
@@ -27,6 +30,7 @@ public final class ScreenCaptureManager: @unchecked Sendable {
             self.pixelSize = pixelSize
             self.scaleFactor = scaleFactor
             self.windows = windows
+            self.primaryScreenHeight = primaryScreenHeight
         }
     }
 
@@ -101,11 +105,17 @@ public final class ScreenCaptureManager: @unchecked Sendable {
 
             let detectedWindows: [DetectedWindow]
             if includeWindowDetection {
-                detectedWindows = WindowDetector.shared.extractVisibleWindows(
-                    from: scWindows,
+                let ordered = WindowDetector.shared.extractOrderedWindows(
                     primaryScreenHeight: primaryHeight,
                     targetScreenFrame: desc.frame
                 )
+                detectedWindows = ordered.isEmpty
+                    ? WindowDetector.shared.extractVisibleWindows(
+                        from: scWindows,
+                        primaryScreenHeight: primaryHeight,
+                        targetScreenFrame: desc.frame
+                    )
+                    : ordered
             } else {
                 detectedWindows = []
             }
@@ -126,7 +136,8 @@ public final class ScreenCaptureManager: @unchecked Sendable {
                         screenFrame: job.desc.frame,
                         pixelSize: CGSize(width: cgImage.width, height: cgImage.height),
                         scaleFactor: job.desc.scale,
-                        windows: job.windows
+                        windows: job.windows,
+                        primaryScreenHeight: primaryHeight
                     )
                 }
             }

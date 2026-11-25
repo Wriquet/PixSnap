@@ -116,6 +116,7 @@ public final class AppSettings {
         static let playCaptureSound = "pixsnap_play_sound"
         static let showMagnifier = "pixsnap_show_magnifier"
         static let enableWindowDetection = "pixsnap_window_detection"
+        static let enableSmartElementDetection = "pixsnap_smart_element_detection"
         static let pinZoomAnchorMode = "PinZoomAnchorMode"
         static let pinShowBorder = "pixsnap_pin_show_border"
         static let pinStayAcrossSpaces = "pixsnap_pin_across_spaces"
@@ -209,6 +210,17 @@ public final class AppSettings {
         }
         set {
             ud.set(newValue, forKey: Keys.enableWindowDetection)
+        }
+    }
+
+    /// 识别窗口内部图片、卡片与 UI 控件边界（视觉边缘检测 + 辅助功能元素树）
+    public var enableSmartElementDetection: Bool {
+        get {
+            if ud.object(forKey: Keys.enableSmartElementDetection) == nil { return true }
+            return ud.bool(forKey: Keys.enableSmartElementDetection)
+        }
+        set {
+            ud.set(newValue, forKey: Keys.enableSmartElementDetection)
         }
     }
 
