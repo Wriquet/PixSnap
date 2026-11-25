@@ -195,6 +195,9 @@ struct OverlaySelectionResizeTests {
         #expect(field.isOpaque == false)
         #expect((field.layer?.backgroundColor?.alpha ?? 0) == 0)
         #expect(field.placeholderString == nil)
-        #expect(field.frame.width < 60) // Compact caret box, no giant empty placeholder box
+        #expect(field.frame.width <= 32)
+        let font = try #require(field.font)
+        let lineH = ceil(("中Ag" as NSString).size(withAttributes: [.font: font]).height)
+        #expect(field.frame.height <= lineH + 3) // Snug to font height with no excess bottom gap
     }
 }

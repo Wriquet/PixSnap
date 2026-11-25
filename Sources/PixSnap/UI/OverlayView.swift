@@ -26,8 +26,10 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
 
     init(origin: CGPoint, color: NSColor, fontSize: CGFloat, maxBounds: CGRect) {
         self.maxBounds = maxBounds
-        let initW: CGFloat = max(28, ceil(fontSize * 1.4))
-        let initH: CGFloat = max(24, ceil(fontSize * 1.38) + 6)
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let lineH = Self.measuredLineHeight(for: font)
+        let initW: CGFloat = max(18, ceil(fontSize * 0.95))
+        let initH: CGFloat = lineH + 2
 
         let clampedX = min(max(maxBounds.minX + 2, origin.x), max(maxBounds.minX + 2, maxBounds.maxX - initW - 2))
         let clampedY = min(max(maxBounds.minY + 2, origin.y - initH / 2), max(maxBounds.minY + 2, maxBounds.maxY - initH - 2))
@@ -40,7 +42,7 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
         self.drawsBackground = false
         self.backgroundColor = .clear
         self.textColor = color
-        self.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        self.font = font
         self.focusRingType = .none
         self.placeholderString = nil
         self.usesSingleLineMode = false
@@ -58,6 +60,10 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
         dashedBorder.strokeColor = color.withAlphaComponent(0.55).cgColor
         self.layer?.addSublayer(dashedBorder)
         updateDashedBorderPath()
+    }
+
+    private static func measuredLineHeight(for font: NSFont) -> CGFloat {
+        ceil(("中Ag" as NSString).size(withAttributes: [.font: font]).height)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -108,16 +114,16 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
 
     func resizeToFitContent() {
         let currentFont = font ?? NSFont.systemFont(ofSize: 19, weight: .semibold)
-        let text = stringValue
-        let minW = max(28, ceil(currentFont.pointSize * 1.4))
-        let lineH = ceil(currentFont.pointSize * 1.38)
+        let text = (currentEditor() as? NSTextView)?.string ?? stringValue
+        let minW = max(18, ceil(currentFont.pointSize * 0.95))
+        let lineH = Self.measuredLineHeight(for: currentFont)
         let maxAvailW = max(minW, maxBounds.maxX - frame.minX - 4)
 
         let newW: CGFloat
         let newH: CGFloat
         if text.isEmpty {
             newW = minW
-            newH = max(24, lineH + 6)
+            newH = lineH + 2
         } else {
             let lines = text.components(separatedBy: "\n")
             var widest: CGFloat = 0
@@ -125,8 +131,8 @@ final class InlineTextField: NSTextField, NSTextFieldDelegate {
                 let measured = ((line.isEmpty ? " " : line) as NSString).size(withAttributes: [.font: currentFont])
                 widest = max(widest, measured.width)
             }
-            newW = min(maxAvailW, max(minW, ceil(widest) + 16))
-            newH = max(lineH + 6, CGFloat(lines.count) * lineH + 6)
+            newW = min(maxAvailW, max(minW, ceil(widest) + 8))
+            newH = CGFloat(max(1, lines.count)) * lineH + 2
         }
 
         // Keep top-left anchored visually while growing
@@ -1356,7 +1362,7 @@ public final class OverlayView: NSView {
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let fontSize = field.font?.pointSize ?? toolbar.activeSize.fontSize
         let color = field.textColor ?? toolbar.activeColor
-        let textOrigin = CGPoint(x: field.frame.minX + 2, y: field.frame.minY + 4)
+        let textOrigin = CGPoint(x: field.frame.minX + 2, y: field.frame.minY + 1)
 
         field.removeFromSuperview()
         activeTextField = nil
