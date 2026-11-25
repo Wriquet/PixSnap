@@ -116,12 +116,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 self.activeOverlays = overlays
 
+                NSApp.activate(ignoringOtherApps: true)
                 for overlay in overlays {
                     overlay.orderFrontRegardless()
                 }
                 keyOverlay?.makeKeyAndOrderFront(nil)
                 keyOverlay?.makeFirstResponder(keyOverlay?.overlayView)
-                NSApp.activate(ignoringOtherApps: true)
             } catch {
                 presentScreenPermissionAlert(error: error)
             }
@@ -295,8 +295,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         syncStatusBarPinState()
 
         DispatchQueue.main.async {
-            pin.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            pin.makeKeyAndOrderFront(nil)
         }
     }
 

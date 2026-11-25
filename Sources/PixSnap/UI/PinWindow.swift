@@ -690,6 +690,31 @@ public final class PinWindow: NSPanel {
         contentViewWrapper.showZoomBadge("\(Int(round(currentScale * 100)))%")
     }
 
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard mods.contains(.command) else { return super.performKeyEquivalent(with: event) }
+        let char = event.charactersIgnoringModifiers?.lowercased()
+        let kc = event.keyCode
+
+        if mods == .command && (kc == 13 || char == "w") {
+            closePin()
+            return true
+        } else if mods == [.command, .option] && (kc == 8 || char == "c") {
+            copyImage()
+            return true
+        } else if mods == .command && (kc == 8 || char == "c") {
+            copySelectionOrImage()
+            return true
+        } else if mods == .command && (kc == 1 || char == "s") {
+            saveImage()
+            return true
+        } else if mods == .command && (kc == 6 || char == "z") {
+            restorePreviousPin()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     public override func keyDown(with event: NSEvent) {
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         let char = event.charactersIgnoringModifiers?.lowercased()

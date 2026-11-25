@@ -145,6 +145,7 @@ public final class OverlayView: NSView {
 
     public override var acceptsFirstResponder: Bool { true }
     public override var isOpaque: Bool { false }
+    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     public init(
         frame frameRect: NSRect,
@@ -905,6 +906,98 @@ public final class OverlayView: NSView {
 
     // MARK: - Keyboard Events
 
+    /// Ensures `selectionRect` is ready for direct Copy / Save / Pin actions even when the user
+    /// hasn't clicked once yet (`.hovering` state): uses the highlighted window, or full screen if none.
+    private func ensureSelectionForImmediateAction() -> Bool {
+        switch state {
+        case .selected:
+            return selectionRect.width > 0 && selectionRect.height > 0
+        case .hovering:
+            if let hw = hoveredWindow {
+                selectionRect = clampRectToBounds(hw.rect)
+            } else {
+                selectionRect = bounds
+            }
+            return selectionRect.width > 0 && selectionRect.height > 0
+        case .selecting:
+            return selectionRect.width >= 4 && selectionRect.height >= 4
+        }
+    }
+
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard activeTextField == nil else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if handleCommandShortcut(event) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Shared handler for Command shortcuts (called from both `performKeyEquivalent` and `keyDown`).
+    /// Matches ANSI virtual keyCodes in addition to characters so shortcuts stay reliable under Chinese IME.
+    @discardableResult
+    private func handleCommandShortcut(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard mods.contains(.command) else { return false }
+        let char = event.charactersIgnoringModifiers?.lowercased()
+        let kc = event.keyCode
+
+        // Cmd + A -> Select Full Screen
+        if mods == .command && (kc == 0 || char == "a") {
+            selectionRect = bounds
+            hoveredWindow = nil
+            enterSelectedState()
+            return true
+        }
+
+        // Cmd + C -> Copy screenshot immediately (works even in .hovering without clicking once first!)
+        if mods == .command && (kc == 8 || char == "c") {
+            if ensureSelectionForImmediateAction() {
+                finishCopy()
+            }
+            return true
+        }
+
+        // Cmd + Shift + S -> Save As
+        if mods == [.command, .shift] && (kc == 1 || char == "s") {
+            if ensureSelectionForImmediateAction() {
+                finishSaveAs()
+            }
+            return true
+        }
+
+        // Cmd + S -> Quick Save
+        if mods == .command && (kc == 1 || char == "s") {
+            if ensureSelectionForImmediateAction() {
+                finishQuickSave()
+            }
+            return true
+        }
+
+        // Cmd + P -> Pin
+        if mods == .command && (kc == 35 || char == "p") {
+            if ensureSelectionForImmediateAction() {
+                finishPin()
+            }
+            return true
+        }
+
+        // Cmd + Shift + Z -> Redo
+        if mods == [.command, .shift] && (kc == 6 || char == "z") {
+            performRedo()
+            return true
+        }
+
+        // Cmd + Z -> Undo
+        if mods == .command && (kc == 6 || char == "z") {
+            performUndo()
+            return true
+        }
+
+        return false
+    }
+
     public override func keyDown(with event: NSEvent) {
         if activeTextField != nil {
             super.keyDown(with: event)
@@ -917,6 +1010,10 @@ public final class OverlayView: NSView {
         // Esc: always exit capture directly (inline text editing handles its own Esc in InlineTextField)
         if event.keyCode == 53 {
             cancelCapture()
+            return
+        }
+
+        if handleCommandShortcut(event) {
             return
         }
 
@@ -934,58 +1031,19 @@ public final class OverlayView: NSView {
             return
         }
 
-        // Enter -> Copy
+        // Enter -> Copy immediately (works in .selected and also directly from .hovering!)
         if event.keyCode == 36 || event.keyCode == 76 {
-            if state == .selected {
+            if ensureSelectionForImmediateAction() {
                 finishCopy()
-            } else if state == .hovering, let hw = hoveredWindow {
-                selectionRect = clampRectToBounds(hw.rect)
-                enterSelectedState()
             }
             return
         }
 
-        // Cmd + A -> Select Full Screen
-        if mods == .command && char == "a" {
-            selectionRect = bounds
-            hoveredWindow = nil
-            enterSelectedState()
-            return
-        }
-
-        // Cmd + C -> Copy screenshot
-        if mods == .command && char == "c" && state == .selected {
-            finishCopy()
-            return
-        }
-
-        // Cmd + Shift + S -> Save As
-        if mods == [.command, .shift] && char == "s" && state == .selected {
-            finishSaveAs()
-            return
-        }
-
-        // Cmd + S -> Quick Save
-        if mods == .command && char == "s" && state == .selected {
-            finishQuickSave()
-            return
-        }
-
-        // Cmd + P or bare T -> Pin
-        if ((mods == .command && char == "p") || (mods.isEmpty && char == "t")) && state == .selected {
-            finishPin()
-            return
-        }
-
-        // Cmd + Shift + Z -> Redo
-        if mods == [.command, .shift] && char == "z" {
-            performRedo()
-            return
-        }
-
-        // Cmd + Z -> Undo
-        if mods == .command && char == "z" {
-            performUndo()
+        // Bare T -> Pin immediately
+        if mods.isEmpty && (event.keyCode == 17 || char == "t") {
+            if ensureSelectionForImmediateAction() {
+                finishPin()
+            }
             return
         }
 

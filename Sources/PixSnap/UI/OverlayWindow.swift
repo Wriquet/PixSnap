@@ -33,6 +33,8 @@ public final class OverlayWindow: NSPanel {
         self.hasShadow = false
         self.ignoresMouseEvents = false
         self.acceptsMouseMovedEvents = true
+        self.becomesKeyOnlyIfNeeded = false
+        self.hidesOnDeactivate = false
         self.isReleasedWhenClosed = false
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 

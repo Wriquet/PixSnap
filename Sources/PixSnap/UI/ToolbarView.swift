@@ -102,6 +102,7 @@ final class HUDButton: NSButton {
     /// NSButton bezels report non-zero alignment insets, which makes the real frame taller than the
     /// 30×30 constraint (non-square highlight). Zero them so the visible pill is a true square.
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
@@ -255,6 +256,7 @@ final class ColorSwatchButton: NSButton {
     required init?(coder: NSCoder) { fatalError() }
 
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { isHovered = false; needsDisplay = true }
